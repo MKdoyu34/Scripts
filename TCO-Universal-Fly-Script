@@ -1,1 +1,78 @@
+local player = game.Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local Humanoid = character:WaitForChild("Humanoid")
+local HumanoidRootPart = character:WaitForChild("HumanoidRootPart")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CurrentCamera = workspace.CurrentCamera
+local v2 = time()
+local v3 = false
+local Flying = false
 
+local function enableFly()
+    Flying = true
+    v3 = false
+    Humanoid.PlatformStand = false
+    HumanoidRootPart.Running.Volume = 0
+end
+
+local function disableFly()
+    Flying = false
+    v3 = false
+    Humanoid.PlatformStand = false
+    HumanoidRootPart.Running.Volume = 0.65
+end
+
+Humanoid:GetPropertyChangedSignal("Jump"):Connect(function()
+    if not Flying then return end
+    Humanoid.Jump = false
+end)
+
+UserInputService.JumpRequest:Connect(function()
+    if not Flying or not (time() - v2 > 0.5) then return end
+    if v3 == false then
+        v3 = true
+        Humanoid.PlatformStand = true
+        HumanoidRootPart.Running.Volume = 0
+        HumanoidRootPart.AssemblyLinearVelocity = HumanoidRootPart.AssemblyLinearVelocity + Vector3.new(0, Humanoid.JumpHeight * 2.5, 0)
+    else
+        v3 = false
+        Humanoid.PlatformStand = false
+    end
+    v2 = time()
+end)
+
+RunService.RenderStepped:Connect(function()
+    if not Flying or not v3 then return end
+    workspace.Gravity = 1
+    HumanoidRootPart.AssemblyLinearVelocity = HumanoidRootPart.AssemblyLinearVelocity / 1.1
+    HumanoidRootPart.AssemblyAngularVelocity = HumanoidRootPart.AssemblyAngularVelocity / 1.1
+    local v32 = require(player:WaitForChild("PlayerScripts").PlayerModule:WaitForChild("ControlModule")):GetMoveVector()
+    local sum = Vector3.new(0, 0, 0)
+    if v32.X > 0.5 then sum = sum + CurrentCamera.CFrame.RightVector end
+    if v32.X < -0.5 then sum = sum - CurrentCamera.CFrame.RightVector end
+    if v32.Z > 0.5 then sum = sum - CurrentCamera.CFrame.LookVector end
+    if v32.Z < -0.5 then sum = sum + CurrentCamera.CFrame.LookVector end
+    if UserInputService:IsKeyDown(Enum.KeyCode.E) then sum = sum + CurrentCamera.CFrame.UpVector end
+    if UserInputService:IsKeyDown(Enum.KeyCode.Q) then sum = sum - CurrentCamera.CFrame.UpVector end
+    HumanoidRootPart.AssemblyLinearVelocity = HumanoidRootPart.AssemblyLinearVelocity + sum * (Humanoid.WalkSpeed / 10 * 2.5)
+    character:PivotTo(CFrame.new(character:GetPivot().Position, character:GetPivot().Position + CurrentCamera.CFrame.LookVector))
+end)
+
+RunService.Heartbeat:Connect(function()
+    if not Flying or v3 then return end
+    workspace.Gravity = 196.2
+end)
+
+player.Chatted:Connect(function(msg)
+    if msg:lower() == "/fly" then
+        enableFly()
+    elseif msg:lower() == "/unfly" then
+        disableFly()
+        workspace.Gravity = 196.2
+    end
+end)
+
+task.wait(0.25)
+
+print ("TCO Fly Script Injected")
