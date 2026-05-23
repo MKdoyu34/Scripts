@@ -8,6 +8,9 @@ local CurrentCamera = workspace.CurrentCamera
 local v2 = time()
 local v3 = false
 local Flying = false
+local DefaultGravity = workspace.Gravity
+
+task.wait(0.5)
 
 local function enableFly()
     Flying = true
@@ -21,6 +24,7 @@ local function disableFly()
     v3 = false
     Humanoid.PlatformStand = false
     HumanoidRootPart.Running.Volume = 0.65
+    workspace.Gravity = DefaultGravity
 end
 
 Humanoid:GetPropertyChangedSignal("Jump"):Connect(function()
@@ -38,6 +42,7 @@ UserInputService.JumpRequest:Connect(function()
     else
         v3 = false
         Humanoid.PlatformStand = false
+        workspace.Gravity = DefaultGravity
     end
     v2 = time()
 end)
@@ -61,7 +66,7 @@ end)
 
 RunService.Heartbeat:Connect(function()
     if not Flying or v3 then return end
-    workspace.Gravity = 196.2
+    workspace.Gravity = DefaultGravity
 end)
 
 player.Chatted:Connect(function(msg)
@@ -69,10 +74,5 @@ player.Chatted:Connect(function(msg)
         enableFly()
     elseif msg:lower() == "/unfly" then
         disableFly()
-        workspace.Gravity = 196.2
     end
 end)
-
-task.wait(0.25)
-
-print ("TCO Fly Script Injected")
