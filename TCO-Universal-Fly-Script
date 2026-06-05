@@ -1,78 +1,182 @@
-local player = game.Players.LocalPlayer
-local character = player.Character or player.CharacterAdded:Wait()
-local Humanoid = character:WaitForChild("Humanoid")
-local HumanoidRootPart = character:WaitForChild("HumanoidRootPart")
+local TextChatService = game:GetService("TextChatService")
+
+local function SendMessage(message: string, r: number, g: number, b: number)
+	local hexColor = string.format("#%02X%02X%02X", r, g, b)
+	local coloredMessage = string.format('<font color="%s">%s</font>', hexColor, message)
+
+	if TextChatService.ChatVersion == Enum.ChatVersion.TextChatService then
+		local systemChannel = TextChatService.TextChannels:FindFirstChild("RBXGeneral")
+		if systemChannel then
+			systemChannel:DisplaySystemMessage(coloredMessage)
+			return
+		end
+	end
+
+	local StarterGui = game:GetService("StarterGui")
+	local success, err = pcall(function()
+		StarterGui:SetCore("ChatMakeSystemMessage", {
+			Text = message,
+			Color = Color3.fromRGB(r, g, b),
+			Font = Enum.Font.Code,
+			FontSize = Enum.FontSize.Size18,
+		})
+	end)
+
+	if not success then
+		warn("[ SendMessageScript ] : Both chat systems failed to display Message")
+		warn("Error: " .. tostring(err))
+	end
+end
+
+task.wait(0.05)
+
+SendMessage("Made by MKdoyu34 :)", 200, 200, 200)
+SendMessage("Thx for using my Universal TCO Fly Script!", 200, 200, 200)
+SendMessage("Game name: " .. game.Name, 200, 200, 200)
+
+task.wait(0.05)
+
+local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
 local CurrentCamera = workspace.CurrentCamera
-local v2 = time()
-local v3 = false
-local Flying = false
-local DefaultGravity = workspace.Gravity
 
-task.wait(0.5)
+local PlayerScripts = LocalPlayer:WaitForChild("PlayerScripts")
+local PlayerModule = PlayerScripts:WaitForChild("PlayerModule")
+local ControlModule = require(PlayerModule:WaitForChild("ControlModule"))
 
-local function enableFly()
-    Flying = true
-    v3 = false
-    Humanoid.PlatformStand = false
-    HumanoidRootPart.Running.Volume = 0
-end
+local isAirborne = false
+local lastJumpTime = time()
+local defaultGravity = workspace.Gravity
+
+local character, Humanoid, HumanoidRootPart
+local renderConnection
 
 local function disableFly()
-    Flying = false
-    v3 = false
-    Humanoid.PlatformStand = false
-    HumanoidRootPart.Running.Volume = 0.65
-    workspace.Gravity = DefaultGravity
+	LocalPlayer:SetAttribute("Flying", false)
+	isAirborne = false
+	if Humanoid then Humanoid.PlatformStand = false end
+	if HumanoidRootPart then HumanoidRootPart.Running.Volume = 0.65 end
+	workspace.Gravity = defaultGravity
 end
 
-Humanoid:GetPropertyChangedSignal("Jump"):Connect(function()
-    if not Flying then return end
-    Humanoid.Jump = false
+local function setupCharacter(newCharacter)
+	if renderConnection then
+		renderConnection:Disconnect()
+		renderConnection = nil
+	end
+
+	isAirborne = false
+	lastJumpTime = time()
+	workspace.Gravity = defaultGravity
+	LocalPlayer:SetAttribute("Flying", false)
+
+	task.wait(0.5)
+
+	character = newCharacter
+	Humanoid = character:WaitForChild("Humanoid")
+	HumanoidRootPart = character:WaitForChild("HumanoidRootPart")
+
+	CurrentCamera.FieldOfView = 70
+
+Humanoid.Died:Connect(function()
+    disableFly()
+    SendMessage("Fly has been disabled since you died, say /fly to fly again!", 200, 200, 200)
+end)
+
+	Humanoid:GetPropertyChangedSignal("Jump"):Connect(function()
+		if LocalPlayer:GetAttribute("Flying") == true then
+			Humanoid.Jump = false
+		end
+	end)
+
+	renderConnection = RunService.RenderStepped:Connect(function()
+		if LocalPlayer:GetAttribute("Flying") ~= true or not isAirborne then return end
+
+		workspace.Gravity = 1
+
+		HumanoidRootPart.AssemblyLinearVelocity = HumanoidRootPart.AssemblyLinearVelocity / 1.1
+		HumanoidRootPart.AssemblyAngularVelocity = HumanoidRootPart.AssemblyAngularVelocity / 1.1
+
+		local moveVector = ControlModule:GetMoveVector()
+		local sum = Vector3.new(0, 0, 0)
+
+		if moveVector.X > 0.5 then
+			sum = sum + CurrentCamera.CFrame.RightVector
+		end
+		if moveVector.X < -0.5 then
+			sum = sum - CurrentCamera.CFrame.RightVector
+		end
+		if moveVector.Z > 0.5 then
+			sum = sum - CurrentCamera.CFrame.LookVector
+		end
+		if moveVector.Z < -0.5 then
+			sum = sum + CurrentCamera.CFrame.LookVector
+		end
+
+		if UserInputService:IsKeyDown(Enum.KeyCode.E) then
+			sum = sum + CurrentCamera.CFrame.UpVector
+		end
+		if UserInputService:IsKeyDown(Enum.KeyCode.Q) then
+			sum = sum - CurrentCamera.CFrame.UpVector
+		end
+
+		HumanoidRootPart.AssemblyLinearVelocity = HumanoidRootPart.AssemblyLinearVelocity
+			+ sum * (Humanoid.WalkSpeed / 10 * 2.5)
+
+		character:PivotTo(CFrame.new(
+			character:GetPivot().Position,
+			character:GetPivot().Position + CurrentCamera.CFrame.LookVector
+		))
+	end)
+end
+
+LocalPlayer.Chatted:Connect(function(message)
+	local msg = message:lower()
+	if msg == "/fly" then
+		LocalPlayer:SetAttribute("Flying", true)
+		SendMessage("Fly has been Enabled!", 200, 200, 200)
+	elseif msg == "/unfly" then
+		disableFly()
+		SendMessage("Fly has been Disabled!", 200, 200, 200)
+	end
+end)
+
+LocalPlayer:GetAttributeChangedSignal("Flying"):Connect(function()
+	if LocalPlayer:GetAttribute("Flying") ~= true then
+		disableFly()
+	end
 end)
 
 UserInputService.JumpRequest:Connect(function()
-    if not Flying or not (time() - v2 > 0.5) then return end
-    if v3 == false then
-        v3 = true
-        Humanoid.PlatformStand = true
-        HumanoidRootPart.Running.Volume = 0
-        HumanoidRootPart.AssemblyLinearVelocity = HumanoidRootPart.AssemblyLinearVelocity + Vector3.new(0, Humanoid.JumpHeight * 2.5, 0)
-    else
-        v3 = false
-        Humanoid.PlatformStand = false
-        workspace.Gravity = DefaultGravity
-    end
-    v2 = time()
+	if LocalPlayer:GetAttribute("Flying") ~= true then return end
+	if not (time() - lastJumpTime > 0.5) then return end
+	if not Humanoid or not HumanoidRootPart then return end
+
+	if isAirborne == false then
+		isAirborne = true
+		Humanoid.PlatformStand = true
+		HumanoidRootPart.Running.Volume = 0
+		HumanoidRootPart.AssemblyLinearVelocity = HumanoidRootPart.AssemblyLinearVelocity
+			+ Vector3.new(0, Humanoid.JumpHeight * 2.5, 0)
+	else
+		isAirborne = false
+		Humanoid.PlatformStand = false
+		HumanoidRootPart.Running.Volume = 0.65
+		workspace.Gravity = defaultGravity
+	end
+
+	lastJumpTime = time()
 end)
 
-RunService.RenderStepped:Connect(function()
-    if not Flying or not v3 then return end
-    workspace.Gravity = 1
-    HumanoidRootPart.AssemblyLinearVelocity = HumanoidRootPart.AssemblyLinearVelocity / 1.1
-    HumanoidRootPart.AssemblyAngularVelocity = HumanoidRootPart.AssemblyAngularVelocity / 1.1
-    local v32 = require(player:WaitForChild("PlayerScripts").PlayerModule:WaitForChild("ControlModule")):GetMoveVector()
-    local sum = Vector3.new(0, 0, 0)
-    if v32.X > 0.5 then sum = sum + CurrentCamera.CFrame.RightVector end
-    if v32.X < -0.5 then sum = sum - CurrentCamera.CFrame.RightVector end
-    if v32.Z > 0.5 then sum = sum - CurrentCamera.CFrame.LookVector end
-    if v32.Z < -0.5 then sum = sum + CurrentCamera.CFrame.LookVector end
-    if UserInputService:IsKeyDown(Enum.KeyCode.E) then sum = sum + CurrentCamera.CFrame.UpVector end
-    if UserInputService:IsKeyDown(Enum.KeyCode.Q) then sum = sum - CurrentCamera.CFrame.UpVector end
-    HumanoidRootPart.AssemblyLinearVelocity = HumanoidRootPart.AssemblyLinearVelocity + sum * (Humanoid.WalkSpeed / 10 * 2.5)
-    character:PivotTo(CFrame.new(character:GetPivot().Position, character:GetPivot().Position + CurrentCamera.CFrame.LookVector))
-end)
+LocalPlayer.CharacterAdded:Connect(setupCharacter)
+if LocalPlayer.Character then
+	setupCharacter(LocalPlayer.Character)
+end
 
-RunService.Heartbeat:Connect(function()
-    if not Flying or v3 then return end
-    workspace.Gravity = DefaultGravity
-end)
+task.wait(0.05)
 
-player.Chatted:Connect(function(msg)
-    if msg:lower() == "/fly" then
-        enableFly()
-    elseif msg:lower() == "/unfly" then
-        disableFly()
-    end
-end)
+SendMessage("Fly script has been Executed!", 200, 200, 200)
+SendMessage("Enjoy flying :D", 200, 200, 200)
