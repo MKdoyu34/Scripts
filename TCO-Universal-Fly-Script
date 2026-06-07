@@ -1,8 +1,7 @@
 local TextChatService = game:GetService("TextChatService")
 
-local function SendMessage(message: string, r: number, g: number, b: number)
-	local hexColor = string.format("#%02X%02X%02X", r, g, b)
-	local coloredMessage = string.format('<font color="%s">%s</font>', hexColor, message)
+local function SendMessage(message: string, hex: string)
+	local coloredMessage = string.format('<font color="%s">%s</font>', hex, message)
 
 	if TextChatService.ChatVersion == Enum.ChatVersion.TextChatService then
 		local systemChannel = TextChatService.TextChannels:FindFirstChild("RBXGeneral")
@@ -12,27 +11,14 @@ local function SendMessage(message: string, r: number, g: number, b: number)
 		end
 	end
 
-	local StarterGui = game:GetService("StarterGui")
-	local success, err = pcall(function()
-		StarterGui:SetCore("ChatMakeSystemMessage", {
-			Text = message,
-			Color = Color3.fromRGB(r, g, b),
-			Font = Enum.Font.Code,
-			FontSize = Enum.FontSize.Size18,
-		})
-	end)
-
-	if not success then
-		warn("[ SendMessageScript ] : Both chat systems failed to display Message")
-		warn("Error: " .. tostring(err))
-	end
+	warn("[ FlyScript ] : TextChatService channel not found, message dropped: " .. message)
 end
 
 task.wait(0.05)
 
-SendMessage("Made by MKdoyu34 :)", 200, 200, 200)
-SendMessage("Thx for using my Universal TCO Fly Script!", 200, 200, 200)
-SendMessage("Game name: " .. game.Name, 200, 200, 200)
+SendMessage("Made by MKdoyu34 :)", "#C8C8C8")
+SendMessage("Thx for using my Universal TCO Fly Script!", "#C8C8C8")
+SendMessage("Game name: " .. game.Name, "#C8C8C8")
 
 task.wait(0.05)
 
@@ -57,8 +43,12 @@ local renderConnection
 local function disableFly()
 	LocalPlayer:SetAttribute("Flying", false)
 	isAirborne = false
-	if Humanoid then Humanoid.PlatformStand = false end
-	if HumanoidRootPart then HumanoidRootPart.Running.Volume = 0.65 end
+	if Humanoid then
+		Humanoid.PlatformStand = false
+	end
+	if HumanoidRootPart then
+		HumanoidRootPart.Running.Volume = 0.65
+	end
 	workspace.Gravity = defaultGravity
 end
 
@@ -81,10 +71,10 @@ local function setupCharacter(newCharacter)
 
 	CurrentCamera.FieldOfView = 70
 
-Humanoid.Died:Connect(function()
-    disableFly()
-    SendMessage("Fly has been disabled since you died, say /fly to fly again!", 200, 200, 200)
-end)
+	Humanoid.Died:Connect(function()
+		disableFly()
+		SendMessage("Fly has been disabled you died, Say /Fly to Re-Enable it again!", "#C8C8C8")
+	end)
 
 	Humanoid:GetPropertyChangedSignal("Jump"):Connect(function()
 		if LocalPlayer:GetAttribute("Flying") == true then
@@ -101,35 +91,30 @@ end)
 		HumanoidRootPart.AssemblyAngularVelocity = HumanoidRootPart.AssemblyAngularVelocity / 1.1
 
 		local moveVector = ControlModule:GetMoveVector()
-		local sum = Vector3.new(0, 0, 0)
+		local sum = Vector3.zero
 
 		if moveVector.X > 0.5 then
-			sum = sum + CurrentCamera.CFrame.RightVector
+			sum += CurrentCamera.CFrame.RightVector
+		elseif moveVector.X < -0.5 then
+			sum -= CurrentCamera.CFrame.RightVector
 		end
-		if moveVector.X < -0.5 then
-			sum = sum - CurrentCamera.CFrame.RightVector
-		end
+
 		if moveVector.Z > 0.5 then
-			sum = sum - CurrentCamera.CFrame.LookVector
-		end
-		if moveVector.Z < -0.5 then
-			sum = sum + CurrentCamera.CFrame.LookVector
+			sum -= CurrentCamera.CFrame.LookVector
+		elseif moveVector.Z < -0.5 then
+			sum += CurrentCamera.CFrame.LookVector
 		end
 
 		if UserInputService:IsKeyDown(Enum.KeyCode.E) then
-			sum = sum + CurrentCamera.CFrame.UpVector
-		end
-		if UserInputService:IsKeyDown(Enum.KeyCode.Q) then
-			sum = sum - CurrentCamera.CFrame.UpVector
+			sum += CurrentCamera.CFrame.UpVector
+		elseif UserInputService:IsKeyDown(Enum.KeyCode.Q) then
+			sum -= CurrentCamera.CFrame.UpVector
 		end
 
-		HumanoidRootPart.AssemblyLinearVelocity = HumanoidRootPart.AssemblyLinearVelocity
-			+ sum * (Humanoid.WalkSpeed / 10 * 2.5)
+		HumanoidRootPart.AssemblyLinearVelocity += sum * (Humanoid.WalkSpeed / 10 * 2.5)
 
-		character:PivotTo(CFrame.new(
-			character:GetPivot().Position,
-			character:GetPivot().Position + CurrentCamera.CFrame.LookVector
-		))
+		local pos = character:GetPivot().Position
+		character:PivotTo(CFrame.new(pos, pos + CurrentCamera.CFrame.LookVector))
 	end)
 end
 
@@ -137,10 +122,10 @@ LocalPlayer.Chatted:Connect(function(message)
 	local msg = message:lower()
 	if msg == "/fly" then
 		LocalPlayer:SetAttribute("Flying", true)
-		SendMessage("Fly has been Enabled!", 200, 200, 200)
+		SendMessage("Fly Enabled!", "#C8C8C8")
 	elseif msg == "/unfly" then
 		disableFly()
-		SendMessage("Fly has been Disabled!", 200, 200, 200)
+		SendMessage("Fly Disabled!", "#C8C8C8")
 	end
 end)
 
@@ -155,12 +140,11 @@ UserInputService.JumpRequest:Connect(function()
 	if not (time() - lastJumpTime > 0.5) then return end
 	if not Humanoid or not HumanoidRootPart then return end
 
-	if isAirborne == false then
+	if not isAirborne then
 		isAirborne = true
 		Humanoid.PlatformStand = true
 		HumanoidRootPart.Running.Volume = 0
-		HumanoidRootPart.AssemblyLinearVelocity = HumanoidRootPart.AssemblyLinearVelocity
-			+ Vector3.new(0, Humanoid.JumpHeight * 2.5, 0)
+		HumanoidRootPart.AssemblyLinearVelocity += Vector3.new(0, Humanoid.JumpHeight * 2.5, 0)
 	else
 		isAirborne = false
 		Humanoid.PlatformStand = false
@@ -178,5 +162,5 @@ end
 
 task.wait(0.05)
 
-SendMessage("Fly script has been Executed!", 200, 200, 200)
-SendMessage("Enjoy flying :D", 200, 200, 200)
+SendMessage("Fly script Executed! Say /Fly to get Started.", "#C8C8C8")
+SendMessage("Enjoy flying :D", "#C8C8C8")
