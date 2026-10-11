@@ -1,0 +1,2481 @@
+--[[============================================================================
+    StudioGUI Creator v1.0 — WYSIWYG GUI Editor for Roblox
+    Modeled after the Roblox Studio workflow.
+
+    FEATURES
+    • Insert Panel (left)      — spawn ScreenGuis, Frames, Buttons, Labels,
+                                 TextBoxes, Images, UICorner, UIListLayout, etc.
+    • Explorer (top right)     — live hierarchy tree with expand/collapse
+    • Properties (below it)    — type-aware editing (UDim2, Color3, Enums, bools)
+    • Viewport manipulation    — click to select, drag to move, 8-handle resize
+    • ScreenGui protection     — the last remaining ScreenGui can't be deleted
+    • Luau Exporter            — serializes the whole project into a clean,
+                                 standalone, re-runnable Luau script
+    • Robust input handling    — inset calibration, touch support, pcall guards
+
+    ENVIRONMENT
+    Executor LocalScript (Delta, Synapse, Wave, Script-Ware, ...).
+    Editor UI is parented to a protected container (gethui/CoreGui fallback).
+    User instances live inside project ScreenGuis under PlayerGui.
+============================================================================]]
+
+local function main()
+
+-- //////////////////////////////////////////////////////////////////////////
+-- SERVICES & ENVIRONMENT
+-- //////////////////////////////////////////////////////////////////////////
+
+local Players          = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local GuiService       = game:GetService("GuiService")
+local TweenService     = game:GetService("TweenService")
+local RunService       = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+while not LocalPlayer do
+    task.wait()
+    LocalPlayer = Players.LocalPlayer
+end
+
+local PlayerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+if not PlayerGui then
+    PlayerGui = LocalPlayer:WaitForChild("PlayerGui", 10)
+end
+if not PlayerGui then
+    warn("[StudioGUI Creator] PlayerGui could not be located — aborting.")
+    return
+end
+
+-- Resolve the most protected container available on this executor.
+local function resolveProtectedParent()
+    local ok, hui = pcall(function()
+        if type(gethui) == "function" then
+            return gethui()
+        end
+        return nil
+    end)
+    if ok and hui then
+        return hui
+    end
+    local okCore, coreGui = pcall(function()
+        return game:GetService("CoreGui")
+    end)
+    if okCore and coreGui then
+        return coreGui
+    end
+    return PlayerGui
+end
+
+local ProtectedParent = resolveProtectedParent()
+local PROJECT_PARENT = PlayerGui
+
+-- Legacy syn.protect_gui support (optional).
+local protectGui
+do
+    local ok, syn = pcall(function() return syn end)
+    if ok and type(syn) == "table" and type(syn.protect_gui) == "function" then
+        protectGui = syn.protect_gui
+    end
+end
+
+-- Executor capability detection.
+local Executor = {
+    clipboard = nil,
+    writefile = nil,
+    name = "unknown",
+}
+do
+    Executor.clipboard = (type(setclipboard) == "function" and setclipboard)
+        or (type(toclipboard) == "function" and toclipboard)
+        or nil
+    Executor.writefile = (type(writefile) == "function") and writefile or nil
+    local ok, id = pcall(function() return identifyexecutor() end)
+    if ok and type(id) == "string" and #id > 0 then
+        Executor.name = id
+    end
+end
+
+-- //////////////////////////////////////////////////////////////////////////
+-- CONFIG & THEME (dark, Studio-inspired)
+-- //////////////////////////////////////////////////////////////////////////
+
+local CONFIG = {
+    WindowTitle = "StudioGUI Creator",
+    WindowSize  = Vector2.new(660, 500),
+}
+
+local THEME = {
+    Window       = Color3.fromRGB(24, 24, 28),
+    Panel        = Color3.fromRGB(30, 30, 35),
+    PanelAlt     = Color3.fromRGB(37, 37, 43),
+    Control      = Color3.fromRGB(48, 48, 56),
+    ControlHover = Color3.fromRGB(60, 60, 70),
+    Stroke       = Color3.fromRGB(58, 58, 66),
+    Accent       = Color3.fromRGB(0, 120, 215),
+    Selection    = Color3.fromRGB(30, 80, 150),
+    Text         = Color3.fromRGB(232, 232, 238),
+    TextDim      = Color3.fromRGB(150, 150, 162),
+    Danger       = Color3.fromRGB(190, 62, 62),
+    Good         = Color3.fromRGB(58, 150, 88),
+    Warn         = Color3.fromRGB(200, 150, 50),
+    Handle       = Color3.fromRGB(255, 255, 255),
+    HandleStroke = Color3.fromRGB(40, 40, 45),
+}
+
+-- //////////////////////////////////////////////////////////////////////////
+-- UTILITIES
+-- //////////////////////////////////////////////////////////////////////////
+
+local function create(class, props, parent)
+    local inst = Instance.new(class)
+    if props then
+        for key, value in pairs(props) do
+            pcall(function() inst[key] = value end)
+        end
+    end
+    if parent then
+        pcall(function() inst.Parent = parent end)
+    end
+    return inst
+end
+
+local function trimNum(n)
+    local num = tonumber(n)
+    if not num or num ~= num then
+        return "0"
+    end
+    if num == math.floor(num) and math.abs(num) < 1e15 then
+        return string.format("%d", num)
+    end
+    return tostring(num)
+end
+
+-- //////////////////////////////////////////////////////////////////////////
+-- CORE STATE
+-- //////////////////////////////////////////////////////////////////////////
+
+local Connections = {}
+local function trackConnection(connection)
+    table.insert(Connections, connection)
+    return connection
+end
+
+-- Forward declarations (resolved later in boot order).
+local Editor      = {}
+local PropPanel
+local invalidateExplorer
+local updateStatus
+local explorerScroll
+local syncSelectionVisuals
+local refreshExplorerSelection
+
+local State = {
+    selected      = nil,
+    editMode      = true,
+    dragging      = nil,
+    resizing      = nil,
+    windowDrag    = nil,
+    collapsed     = setmetatable({}, { __mode = "k" }),
+    nameCounters  = {},
+    spawnCascade  = 0,
+}
+
+-- //////////////////////////////////////////////////////////////////////////
+-- PROJECT REGISTRY (tracked ScreenGuis)
+-- //////////////////////////////////////////////////////////////////////////
+
+local PROJECT_ATTRIBUTE = "SGC_Project"
+
+local function treeChildren(inst)
+    local out = {}
+    for _, child in ipairs(inst:GetChildren()) do
+        if child:IsA("GuiObject") or child:IsA("UIComponent") or child:IsA("UILayout") then
+            table.insert(out, child)
+        end
+    end
+    return out
+end
+
+local function isProjectScreenGui(inst)
+    if typeof(inst) ~= "Instance" then return false end
+    if not inst:IsA("ScreenGui") then return false end
+    if not inst.Parent then return false end
+    return inst:GetAttribute(PROJECT_ATTRIBUTE) == true
+end
+
+local function getProjectScreenGuis()
+    local found = {}
+    for _, child in ipairs(PROJECT_PARENT:GetChildren()) do
+        if isProjectScreenGui(child) then
+            table.insert(found, child)
+        end
+    end
+    table.sort(found, function(a, b) return a.Name < b.Name end)
+    return found
+end
+
+local function uniqueName(base)
+    State.nameCounters[base] = (State.nameCounters[base] or 0) + 1
+    local count = State.nameCounters[base]
+    if count == 1 then
+        return base
+    end
+    return base .. tostring(count)
+end
+
+local function createProjectScreenGui(customName)
+    local sg = create("ScreenGui", {
+        Name           = customName or uniqueName("ScreenGui"),
+        ResetOnSpawn   = false,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+        DisplayOrder   = 50,
+    })
+    sg:SetAttribute(PROJECT_ATTRIBUTE, true)
+    sg.Parent = PROJECT_PARENT
+    return sg
+end
+
+-- ScreenGui protection rule: the project must always keep at least one.
+local function ensureProjectIntegrity()
+    if #getProjectScreenGuis() == 0 then
+        createProjectScreenGui()
+    end
+end
+
+-- //////////////////////////////////////////////////////////////////////////
+-- COORDINATE CALIBRATION & MOUSE HELPERS
+-- AbsolutePosition vs GetMouseLocation inset behavior varies between
+-- clients/executors — this calibrates it once at runtime.
+-- //////////////////////////////////////////////////////////////////////////
+
+local InsetCompensated = false
+do
+    local probeGui = create("ScreenGui", {
+        Name = "SGC_Calibration",
+        DisplayOrder = -1000000,
+        ResetOnSpawn = false,
+    })
+    local probe = create("Frame", {
+        Size = UDim2.fromOffset(1, 1),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+    }, probeGui)
+    local ok = pcall(function() probeGui.Parent = PROJECT_PARENT end)
+    if ok then
+        task.wait() -- allow one layout pass
+        pcall(function()
+            -- Model A (standard): a (0,0) child inside a standard ScreenGui
+            -- reports the GUI inset as its Y. If it reports 0, this client
+            -- needs manual inset compensation for hit-testing.
+            InsetCompensated = (probe.AbsolutePosition.Y < 1)
+        end)
+    end
+    pcall(function() probeGui:Destroy() end)
+end
+
+local function getGuiInset()
+    local ok, inset = pcall(GuiService.GetGuiInset, GuiService)
+    if ok and typeof(inset) == "Vector2" then
+        return inset
+    end
+    return Vector2.zero
+end
+
+-- Converts a GuiBase2d AbsolutePosition into physical screen space
+-- (the same space used by GetMouseLocation / InputObject.Position).
+local function absToScreen(ownerScreenGui, absolutePosition)
+    if not InsetCompensated then
+        return absolutePosition
+    end
+    local ignoring = false
+    if ownerScreenGui then
+        pcall(function() ignoring = ownerScreenGui.IgnoreGuiInset end)
+    end
+    if ignoring then
+        return absolutePosition
+    end
+    return absolutePosition + getGuiInset()
+end
+
+local lastMousePos = Vector2.zero
+local function inputScreenPos(inputObject)
+    if inputObject then
+        local ok, pos = pcall(function() return inputObject.Position end)
+        if ok and typeof(pos) == "Vector2" then
+            lastMousePos = pos
+            return pos
+        end
+    end
+    local ok, pos = pcall(function() return UserInputService:GetMouseLocation() end)
+    if ok and typeof(pos) == "Vector2" then
+        lastMousePos = pos
+        return pos
+    end
+    return lastMousePos
+end
+
+-- //////////////////////////////////////////////////////////////////////////
+-- PROTECTED OVERLAY + NOTIFICATIONS
+-- //////////////////////////////////////////////////////////////////////////
+
+local Overlay = create("ScreenGui", {
+    Name           = "SGC_Editor",
+    IgnoreGuiInset = true,
+    ResetOnSpawn   = false,
+    DisplayOrder   = 1000000,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+})
+if protectGui then
+    pcall(protectGui, Overlay)
+end
+Overlay.Parent = ProtectedParent
+
+local Notifications
+do
+    local holder = create("Frame", {
+        Name = "Notifications",
+        BackgroundTransparency = 1,
+        Position = UDim2.new(0.5, -160, 0, 10),
+        Size = UDim2.fromOffset(320, 0),
+        ZIndex = 100,
+    }, Overlay)
+    create("UIListLayout", {
+        Padding = UDim.new(0, 6),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        HorizontalAlignment = Enum.HorizontalAlignment.Center,
+    }, holder)
+
+    local styleForKind = {
+        info    = THEME.Accent,
+        success = THEME.Good,
+        warn    = THEME.Warn,
+        error   = THEME.Danger,
+    }
+    local toastSequence = 0
+
+    Notifications = {}
+    function Notifications.show(text, kind, duration)
+        local barColor = styleForKind[kind] or styleForKind.info
+        toastSequence += 1
+        local toast = create("Frame", {
+            Size = UDim2.new(1, 0, 0, 34),
+            BackgroundColor3 = THEME.PanelAlt,
+            BorderSizePixel = 0,
+            ZIndex = 100,
+            LayoutOrder = toastSequence,
+        }, holder)
+        create("UICorner", { CornerRadius = UDim.new(0, 6) }, toast)
+        create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, toast)
+        create("Frame", {
+            Size = UDim2.new(0, 3, 1, -8),
+            Position = UDim2.fromOffset(6, 4),
+            BackgroundColor3 = barColor,
+            BorderSizePixel = 0,
+            ZIndex = 101,
+        }, toast)
+        create("TextLabel", {
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(16, 0),
+            Size = UDim2.new(1, -24, 1, 0),
+            Text = tostring(text),
+            TextColor3 = THEME.Text,
+            Font = Enum.Font.GothamMedium,
+            TextSize = 13,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            ZIndex = 101,
+        }, toast)
+
+        task.delay(duration or 3, function()
+            if not toast.Parent then return end
+            pcall(function()
+                TweenService:Create(toast, TweenInfo.new(0.3), { BackgroundTransparency = 1 }):Play()
+                for _, d in ipairs(toast:GetDescendants()) do
+                    if d:IsA("TextLabel") then
+                        TweenService:Create(d, TweenInfo.new(0.3), { TextTransparency = 1 }):Play()
+                    elseif d:IsA("Frame") then
+                        TweenService:Create(d, TweenInfo.new(0.3), { BackgroundTransparency = 1 }):Play()
+                    elseif d:IsA("UIStroke") then
+                        TweenService:Create(d, TweenInfo.new(0.3), { Transparency = 1 }):Play()
+                    end
+                end
+            end)
+            task.delay(0.32, function()
+                pcall(function() toast:Destroy() end)
+            end)
+        end)
+
+        local kids = {}
+        for _, c in ipairs(holder:GetChildren()) do
+            if c:IsA("Frame") then
+                table.insert(kids, c)
+            end
+        end
+        while #kids > 5 do
+            local oldest = table.remove(kids, 1)
+            pcall(function() oldest:Destroy() end)
+        end
+    end
+end
+
+local notify = Notifications.show
+
+-- //////////////////////////////////////////////////////////////////////////
+-- SELECTION VISUALS (outline, 8 resize handles, name tag)
+-- //////////////////////////////////////////////////////////////////////////
+
+local Visuals = {}
+
+local HANDLE_LAYOUT = {
+    { dir = "TL", ax = 0,   ay = 0   },
+    { dir = "T",  ax = 0.5, ay = 0   },
+    { dir = "TR", ax = 1,   ay = 0   },
+    { dir = "L",  ax = 0,   ay = 0.5 },
+    { dir = "R",  ax = 1,   ay = 0.5 },
+    { dir = "BL", ax = 0,   ay = 1   },
+    { dir = "B",  ax = 0.5, ay = 1   },
+    { dir = "BR", ax = 1,   ay = 1   },
+}
+
+do
+    local container = create("Frame", {
+        Name = "SelectionVisuals",
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        Active = false,
+        ZIndex = 5,
+    }, Overlay)
+
+    local outline = create("Frame", {
+        Name = "Outline",
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Active = false,
+        Visible = false,
+        ZIndex = 5,
+    }, container)
+    create("UIStroke", {
+        Color = THEME.Accent,
+        Thickness = 1,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+    }, outline)
+
+    local handles = {}
+    for _, mapping in ipairs(HANDLE_LAYOUT) do
+        local handle = create("Frame", {
+            Name = "Handle_" .. mapping.dir,
+            Size = UDim2.fromOffset(8, 8),
+            AnchorPoint = Vector2.new(mapping.ax, mapping.ay),
+            BackgroundColor3 = THEME.Handle,
+            BorderSizePixel = 0,
+            Visible = false,
+            Active = true,
+            ZIndex = 8,
+        }, container)
+        create("UICorner", { CornerRadius = UDim.new(0, 2) }, handle)
+        create("UIStroke", { Color = THEME.HandleStroke, Thickness = 1 }, handle)
+        handles[mapping.dir] = handle
+        handle.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch then
+                Editor.beginResize(mapping.dir, input)
+            end
+        end)
+    end
+
+    local nameTag = create("TextLabel", {
+        Name = "NameTag",
+        Size = UDim2.fromOffset(0, 18),
+        BackgroundColor3 = THEME.PanelAlt,
+        BorderSizePixel = 0,
+        Visible = false,
+        Text = "",
+        TextColor3 = THEME.Text,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 12,
+        ZIndex = 9,
+        AutomaticSize = Enum.AutomaticSize.X,
+    }, container)
+    create("UICorner", { CornerRadius = UDim.new(0, 4) }, nameTag)
+    create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, nameTag)
+    create("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6) }, nameTag)
+
+    Visuals = {
+        container = container,
+        outline = outline,
+        handles = handles,
+        nameTag = nameTag,
+    }
+end
+
+local function ownerScreenGuiOf(inst)
+    if inst:IsA("ScreenGui") then
+        return inst
+    end
+    return inst:FindFirstAncestorOfClass("ScreenGui")
+end
+
+syncSelectionVisuals = function()
+    local sel = State.selected
+    local show = sel ~= nil and sel.Parent ~= nil and State.editMode
+    Visuals.container.Visible = show
+    if not show then
+        return
+    end
+
+    pcall(function()
+        -- UI components (UICorner etc.) have no geometry — outline their parent.
+        local boundsTarget = sel:IsA("GuiObject") and sel or sel.Parent
+        if not boundsTarget then
+            Visuals.container.Visible = false
+            return
+        end
+        local sg = ownerScreenGuiOf(boundsTarget)
+        local origin = absToScreen(sg, boundsTarget.AbsolutePosition)
+        local size = boundsTarget.AbsoluteSize
+
+        Visuals.outline.Visible = true
+        Visuals.outline.Position = UDim2.fromOffset(origin.X, origin.Y)
+        Visuals.outline.Size = UDim2.fromOffset(size.X, size.Y)
+
+        local canManipulate = sel:IsA("GuiObject")
+        for _, mapping in ipairs(HANDLE_LAYOUT) do
+            local handle = Visuals.handles[mapping.dir]
+            handle.Visible = canManipulate
+            if canManipulate then
+                local px = origin.X + size.X * mapping.ax
+                local py = origin.Y + size.Y * mapping.ay
+                handle.Position = UDim2.fromOffset(px, py)
+            end
+        end
+
+        Visuals.nameTag.Visible = true
+        Visuals.nameTag.Text = sel.ClassName .. "  ·  " .. sel.Name
+        local tagY = origin.Y - 24
+        if tagY < 2 then
+            tagY = origin.Y + size.Y + 6
+        end
+        Visuals.nameTag.Position = UDim2.fromOffset(origin.X, tagY)
+    end)
+end
+
+local function isOverHandle(screenPos)
+    local sel = State.selected
+    if not sel or not sel.Parent or not sel:IsA("GuiObject") or not State.editMode then
+        return false
+    end
+    for _, handle in pairs(Visuals.handles) do
+        if handle.Visible then
+            local ok, ap, as = pcall(function()
+                return handle.AbsolutePosition, handle.AbsoluteSize
+            end)
+            if ok and ap and as
+                and screenPos.X >= ap.X - 3 and screenPos.X <= ap.X + as.X + 3
+                and screenPos.Y >= ap.Y - 3 and screenPos.Y <= ap.Y + as.Y + 3 then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- //////////////////////////////////////////////////////////////////////////
+-- MAIN WINDOW (title bar, toolbar, toolbox | explorer/properties, status)
+-- //////////////////////////////////////////////////////////////////////////
+
+local UI = { windows = {} }
+
+do
+    local main = create("Frame", {
+        Name = "MainWindow",
+        Size = UDim2.fromOffset(CONFIG.WindowSize.X, CONFIG.WindowSize.Y),
+        Position = UDim2.fromOffset(60, 110),
+        BackgroundColor3 = THEME.Window,
+        BorderSizePixel = 0,
+        Active = true,
+        ZIndex = 10,
+    }, Overlay)
+    create("UICorner", { CornerRadius = UDim.new(0, 8) }, main)
+    create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, main)
+
+    -- Center the window on first open.
+    do
+        local ok, viewport = pcall(function()
+            return workspace.CurrentCamera.ViewportSize
+        end)
+        if ok and viewport then
+            local x = math.clamp((viewport.X - CONFIG.WindowSize.X) / 2, 8, math.max(8, viewport.X - CONFIG.WindowSize.X - 8))
+            local y = math.clamp((viewport.Y - CONFIG.WindowSize.Y) / 2, 8, math.max(8, viewport.Y - CONFIG.WindowSize.Y - 8))
+            main.Position = UDim2.fromOffset(math.floor(x), math.floor(y))
+        end
+    end
+
+    -- Title bar ------------------------------------------------------------
+    local titleBar = create("Frame", {
+        Name = "TitleBar",
+        Size = UDim2.new(1, 0, 0, 32),
+        BackgroundColor3 = THEME.PanelAlt,
+        BorderSizePixel = 0,
+        Active = true,
+        ZIndex = 11,
+    }, main)
+    create("UICorner", { CornerRadius = UDim.new(0, 8) }, titleBar)
+
+    local titleIcon = create("Frame", {
+        Size = UDim2.fromOffset(10, 10),
+        Position = UDim2.fromOffset(12, 11),
+        BackgroundColor3 = THEME.Accent,
+        BorderSizePixel = 0,
+        ZIndex = 12,
+    }, titleBar)
+    create("UICorner", { CornerRadius = UDim.new(0, 3) }, titleIcon)
+
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(30, 0),
+        Size = UDim2.new(1, -120, 1, 0),
+        Text = CONFIG.WindowTitle .. "  —  " .. Executor.name,
+        TextColor3 = THEME.Text,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        ZIndex = 12,
+    }, titleBar)
+
+    local function windowButton(text, offsetX, onClick, textColor)
+        local btn = create("TextButton", {
+            Size = UDim2.fromOffset(26, 20),
+            Position = UDim2.new(1, offsetX, 0.5, -10),
+            BackgroundColor3 = THEME.Control,
+            BorderSizePixel = 0,
+            Text = text,
+            TextColor3 = textColor or THEME.TextDim,
+            Font = Enum.Font.GothamBold,
+            TextSize = 12,
+            AutoButtonColor = false,
+            ZIndex = 12,
+        }, titleBar)
+        create("UICorner", { CornerRadius = UDim.new(0, 4) }, btn)
+        btn.MouseEnter:Connect(function() btn.BackgroundColor3 = THEME.ControlHover end)
+        btn.MouseLeave:Connect(function() btn.BackgroundColor3 = THEME.Control end)
+        btn.Activated:Connect(onClick)
+        return btn
+    end
+
+    local bodyAndStatus = {}
+    local minimized = false
+    windowButton("–", -64, function()
+        minimized = not minimized
+        for _, frame in ipairs(bodyAndStatus) do
+            frame.Visible = not minimized
+        end
+        main.Size = minimized
+            and UDim2.fromOffset(CONFIG.WindowSize.X, 32)
+            or UDim2.fromOffset(CONFIG.WindowSize.X, CONFIG.WindowSize.Y)
+    end, THEME.Text)
+    windowButton("×", -34, function() Editor.destroy() end, THEME.Text)
+
+    -- Window dragging (handled centrally in the input section).
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            State.windowDrag = {
+                startMouse = inputScreenPos(input),
+                startPosition = main.Position,
+            }
+        end
+    end)
+
+    -- Toolbar ---------------------------------------------------------------
+    local body = create("Frame", {
+        Name = "Body",
+        Position = UDim2.fromOffset(0, 32),
+        Size = UDim2.new(1, 0, 1, -56),
+        BackgroundTransparency = 1,
+        ZIndex = 11,
+    }, main)
+    table.insert(bodyAndStatus, body)
+
+    local toolbar = create("Frame", {
+        Name = "Toolbar",
+        Size = UDim2.new(1, 0, 0, 36),
+        BackgroundColor3 = THEME.Panel,
+        BorderSizePixel = 0,
+        ZIndex = 11,
+    }, body)
+    create("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        Padding = UDim.new(0, 6),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        VerticalAlignment = Enum.VerticalAlignment.Center,
+    }, toolbar)
+    create("UIPadding", { PaddingLeft = UDim.new(0, 8) }, toolbar)
+
+    local function makeToolbarButton(text, onClick, options)
+        options = options or {}
+        local btn = create("TextButton", {
+            Size = UDim2.fromOffset(options.width or 80, 24),
+            BackgroundColor3 = options.accent and THEME.Accent or THEME.Control,
+            BorderSizePixel = 0,
+            Text = text,
+            TextColor3 = THEME.Text,
+            Font = Enum.Font.GothamMedium,
+            TextSize = 12,
+            AutoButtonColor = false,
+            ZIndex = 12,
+            LayoutOrder = options.order or 0,
+        }, toolbar)
+        create("UICorner", { CornerRadius = UDim.new(0, 5) }, btn)
+        if not options.accent then
+            create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, btn)
+        end
+        btn.MouseEnter:Connect(function()
+            btn.BackgroundColor3 = options.accent and THEME.Accent or THEME.ControlHover
+        end)
+        btn.MouseLeave:Connect(function()
+            btn.BackgroundColor3 = options.accent and THEME.Accent or THEME.Control
+        end)
+        btn.Activated:Connect(onClick)
+        return btn
+    end
+
+    UI.makeToolbarButton = makeToolbarButton
+
+    -- Columns: Toolbox (left) | Explorer stacked above Properties ----------
+    local columns = create("Frame", {
+        Position = UDim2.fromOffset(0, 36),
+        Size = UDim2.new(1, 0, 1, -36),
+        BackgroundTransparency = 1,
+        ZIndex = 11,
+    }, body)
+
+    local toolboxColumn = create("Frame", {
+        Position = UDim2.fromOffset(6, 0),
+        Size = UDim2.new(0, 150, 1, -6),
+        BackgroundColor3 = THEME.Panel,
+        BorderSizePixel = 0,
+        ZIndex = 11,
+    }, columns)
+    create("UICorner", { CornerRadius = UDim.new(0, 6) }, toolboxColumn)
+    create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, toolboxColumn)
+
+    local mainColumn = create("Frame", {
+        Position = UDim2.fromOffset(162, 0),
+        Size = UDim2.new(1, -168, 1, -6),
+        BackgroundTransparency = 1,
+        ZIndex = 11,
+    }, columns)
+
+    local explorerColumn = create("Frame", {
+        Size = UDim2.new(1, 0, 0.40, -4),
+        BackgroundColor3 = THEME.Panel,
+        BorderSizePixel = 0,
+        ZIndex = 11,
+    }, mainColumn)
+    create("UICorner", { CornerRadius = UDim.new(0, 6) }, explorerColumn)
+    create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, explorerColumn)
+
+    local propertiesColumn = create("Frame", {
+        Position = UDim2.new(0, 0, 0.40, 6),
+        Size = UDim2.new(1, 0, 0.60, -6),
+        BackgroundColor3 = THEME.Panel,
+        BorderSizePixel = 0,
+        ZIndex = 11,
+    }, mainColumn)
+    create("UICorner", { CornerRadius = UDim.new(0, 6) }, propertiesColumn)
+    create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, propertiesColumn)
+
+    local function makeColumnHeader(parent, title)
+        create("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 24),
+            BackgroundColor3 = THEME.PanelAlt,
+            BorderSizePixel = 0,
+            Text = title,
+            TextColor3 = THEME.TextDim,
+            Font = Enum.Font.GothamBold,
+            TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            ZIndex = 12,
+        }, parent)
+    end
+
+    local function makeScrollList(parent, topOffset)
+        local scroll = create("ScrollingFrame", {
+            Position = UDim2.fromOffset(0, topOffset or 24),
+            Size = UDim2.new(1, 0, 1, -(topOffset or 24)),
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            CanvasSize = UDim2.new(),
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            ScrollingDirection = Enum.ScrollingDirection.Y,
+            ScrollBarThickness = 4,
+            ScrollBarImageColor3 = THEME.ControlHover,
+            ElasticBehavior = Enum.ElasticBehavior.Never,
+            ZIndex = 12,
+        }, parent)
+        create("UIListLayout", {
+            Padding = UDim.new(0, 2),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, scroll)
+        create("UIPadding", {
+            PaddingTop = UDim.new(0, 4),
+            PaddingBottom = UDim.new(0, 6),
+            PaddingLeft = UDim.new(0, 4),
+            PaddingRight = UDim.new(0, 6),
+        }, scroll)
+        return scroll
+    end
+
+    -- Status bar ------------------------------------------------------------
+    local statusBar = create("Frame", {
+        AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0, 0, 1, 0),
+        Size = UDim2.new(1, 0, 0, 24),
+        BackgroundColor3 = THEME.PanelAlt,
+        BorderSizePixel = 0,
+        ZIndex = 11,
+    }, main)
+    table.insert(bodyAndStatus, statusBar)
+
+    local statusLeft = create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(8, 0),
+        Size = UDim2.new(0.62, 0, 1, 0),
+        Text = "",
+        TextColor3 = THEME.TextDim,
+        Font = Enum.Font.Gotham,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        ZIndex = 12,
+    }, statusBar)
+
+    local statusRight = create("TextLabel", {
+        BackgroundTransparency = 1,
+        AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, -8, 0, 0),
+        Size = UDim2.new(0.36, 0, 1, 0),
+        Text = "No selection",
+        TextColor3 = THEME.Text,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        ZIndex = 12,
+    }, statusBar)
+
+    UI.main = main
+    UI.windows = { main }
+    UI.statusLeft = statusLeft
+    UI.statusRight = statusRight
+    UI.toolboxColumn = toolboxColumn
+    UI.explorerColumn = explorerColumn
+    UI.propertiesColumn = propertiesColumn
+    UI.makeColumnHeader = makeColumnHeader
+    UI.makeScrollList = makeScrollList
+end
+
+-- //////////////////////////////////////////////////////////////////////////
+-- PROPERTY SCHEMA (single source of truth for Properties panel + Exporter)
+-- //////////////////////////////////////////////////////////////////////////
+
+local PROP_GROUPS = {
+    base     = { "Position", "Size", "AnchorPoint", "Rotation", "BackgroundColor3", "BackgroundTransparency", "BorderSizePixel", "Visible", "ZIndex", "ClipsDescendants" },
+    text     = { "Text", "TextColor3", "TextSize", "TextScaled", "Font", "TextTransparency", "RichText", "TextXAlignment", "TextYAlignment" },
+    button   = { "AutoButtonColor" },
+    textbox  = { "PlaceholderText", "PlaceholderColor3", "ClearTextOnFocus", "MultiLine" },
+    image    = { "Image", "ImageColor3", "ImageTransparency" },
+    scroll   = { "CanvasSize", "CanvasPosition", "ScrollingEnabled", "ScrollBarThickness", "ScrollBarImageColor3" },
+    corner   = { "CornerRadius" },
+    stroke   = { "Color", "Thickness", "Transparency", "ApplyStrokeMode" },
+    list     = { "FillDirection", "Padding", "SortOrder", "HorizontalAlignment", "VerticalAlignment" },
+    grid     = { "FillDirection", "CellSize", "CellPadding", "SortOrder", "HorizontalAlignment", "VerticalAlignment" },
+    padding  = { "PaddingTop", "PaddingLeft", "PaddingRight", "PaddingBottom" },
+    scale    = { "Scale" },
+    canvas   = { "GroupTransparency" },
+    screengui = { "Enabled", "DisplayOrder", "IgnoreGuiInset", "ResetOnSpawn", "ZIndexBehavior" },
+}
+
+local CLASS_GROUPS = {
+    ScreenGui      = { "screengui" },
+    Frame          = { "base" },
+    CanvasGroup    = { "base", "canvas" },
+    ScrollingFrame = { "base", "scroll" },
+    TextLabel      = { "base", "text" },
+    TextButton     = { "base", "text", "button" },
+    TextBox        = { "base", "text", "textbox" },
+    ImageLabel     = { "base", "image" },
+    ImageButton    = { "base", "image", "button" },
+    UICorner       = { "corner" },
+    UIStroke       = { "stroke" },
+    UIListLayout   = { "list" },
+    UIGridLayout   = { "grid" },
+    UIPadding      = { "padding" },
+    UIScale        = { "scale" },
+}
+
+local PROP_TYPES = {
+    Name = "string",
+    Position = "udim2", Size = "udim2", AnchorPoint = "vector2", Rotation = "number",
+    BackgroundColor3 = "color", BackgroundTransparency = "number", BorderSizePixel = "number",
+    Visible = "bool", ZIndex = "number", ClipsDescendants = "bool",
+    Text = "string", TextColor3 = "color", TextSize = "number", TextScaled = "bool",
+    Font = "enum:Font", TextTransparency = "number", RichText = "bool",
+    TextXAlignment = "enum:TextXAlignment", TextYAlignment = "enum:TextYAlignment",
+    AutoButtonColor = "bool",
+    PlaceholderText = "string", PlaceholderColor3 = "color", ClearTextOnFocus = "bool", MultiLine = "bool",
+    Image = "asset", ImageColor3 = "color", ImageTransparency = "number",
+    CanvasSize = "udim2", CanvasPosition = "vector2", ScrollingEnabled = "bool",
+    ScrollBarThickness = "number", ScrollBarImageColor3 = "color",
+    CornerRadius = "udim",
+    Color = "color", Thickness = "number", Transparency = "number", ApplyStrokeMode = "enum:ApplyStrokeMode",
+    FillDirection = "enum:FillDirection", Padding = "udim", SortOrder = "enum:SortOrder",
+    HorizontalAlignment = "enum:HorizontalAlignment", VerticalAlignment = "enum:VerticalAlignment",
+    CellSize = "udim2", CellPadding = "udim2",
+    PaddingTop = "udim", PaddingLeft = "udim", PaddingRight = "udim", PaddingBottom = "udim",
+    Scale = "number", GroupTransparency = "number",
+    Enabled = "bool", DisplayOrder = "number", IgnoreGuiInset = "bool",
+    ResetOnSpawn = "bool", ZIndexBehavior = "enum:ZIndexBehavior",
+}
+
+-- //////////////////////////////////////////////////////////////////////////
+-- PROPERTY PARSING / FORMATTING
+-- //////////////////////////////////////////////////////////////////////////
+
+local function parseColorText(text)
+    local s = tostring(text)
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    s = s:gsub("^#", ""):gsub("%s", "")
+    local r, g, b = s:match("^(%d+),(%d+),(%d+)$")
+    if r then
+        return Color3.fromRGB(tonumber(r) or 0, tonumber(g) or 0, tonumber(b) or 0)
+    end
+    if #s == 6 and s:match("^%x+$") then
+        local rr = tonumber(s:sub(1, 2), 16)
+        local gg = tonumber(s:sub(3, 4), 16)
+        local bb = tonumber(s:sub(5, 6), 16)
+        if rr and gg and bb then
+            return Color3.fromRGB(rr, gg, bb)
+        end
+    end
+    return nil
+end
+
+local function parseNumberList(text, count)
+    local tokens = {}
+    for token in tostring(text):gmatch("[^,%s]+") do
+        tokens[#tokens + 1] = token
+    end
+    if #tokens ~= count then
+        return nil
+    end
+    local nums = {}
+    for i, token in ipairs(tokens) do
+        local n = tonumber(token)
+        if not n then
+            return nil
+        end
+        nums[i] = n
+    end
+    return nums
+end
+
+local function parseAssetText(text)
+    local s = tostring(text)
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    if s == "" then
+        return ""
+    end
+    if s:match("^rbxassetid://") or s:match("^rbxasset://") or s:match("^rbxthumb://") then
+        return s
+    end
+    if s:match("^%d+$") then
+        return "rbxassetid://" .. s
+    end
+    return nil
+end
+
+local function parseEnumText(enumType, text)
+    local name = tostring(text)
+    name = name:gsub("^%s+", ""):gsub("%s+$", "")
+    name = name:gsub("^Enum%.%w+%.?", "") -- accept "Enum.Font.Gotham" too
+    if name == "" then
+        return nil
+    end
+    local ok, item = pcall(function()
+        return Enum[enumType][name]
+    end)
+    if ok and item then
+        return item
+    end
+    return nil
+end
+
+local function formatValue(ptype, value)
+    local ok, result = pcall(function()
+        if ptype == "color" then
+            return ("%d, %d, %d"):format(
+                math.floor(value.R * 255 + 0.5),
+                math.floor(value.G * 255 + 0.5),
+                math.floor(value.B * 255 + 0.5))
+        elseif ptype == "udim2" then
+            return ("%s, %s, %s, %s"):format(
+                trimNum(value.X.Scale), trimNum(value.X.Offset),
+                trimNum(value.Y.Scale), trimNum(value.Y.Offset))
+        elseif ptype == "udim" then
+            return ("%s, %s"):format(trimNum(value.Scale), trimNum(value.Offset))
+        elseif ptype == "vector2" then
+            return ("%s, %s"):format(trimNum(value.X), trimNum(value.Y))
+        elseif ptype:sub(1, 5) == "enum:" then
+            return value.Name
+        elseif ptype == "bool" then
+            return value and "true" or "false"
+        elseif ptype == "number" then
+            return trimNum(value)
+        end
+        return tostring(value)
+    end)
+    return ok and result or ""
+end
+
+local function parsePropertyValue(ptype, text)
+    if ptype == "string" then
+        return tostring(text)
+    elseif ptype == "number" then
+        return tonumber(text)
+    elseif ptype == "color" then
+        return parseColorText(text)
+    elseif ptype == "udim2" then
+        local nums = parseNumberList(text, 4)
+        if not nums then return nil end
+        return UDim2.new(nums[1], nums[2], nums[3], nums[4])
+    elseif ptype == "udim" then
+        local nums = parseNumberList(text, 2)
+        if not nums then
+            local single = parseNumberList(text, 1)
+            if single then
+                nums = { 0, single[1] } -- "10" => UDim.new(0, 10)
+            end
+        end
+        if not nums then return nil end
+        return UDim.new(nums[1], nums[2])
+    elseif ptype == "vector2" then
+        local nums = parseNumberList(text, 2)
+        if not nums then return nil end
+        return Vector2.new(nums[1], nums[2])
+    elseif ptype == "asset" then
+        return parseAssetText(text)
+    elseif ptype:sub(1, 5) == "enum:" then
+        return parseEnumText(ptype:sub(6), text)
+    end
+    return nil
+end
+
+local function applyProperty(obj, propName, text, ptype)
+    local value = parsePropertyValue(ptype, text)
+    if value == nil then
+        notify(("Invalid value for %s"):format(propName), "error", 2.5)
+        return false
+    end
+    local ok = pcall(function()
+        obj[propName] = value
+    end)
+    if not ok then
+        notify(("Failed to set %s"):format(propName), "error", 2.5)
+        return false
+    end
+    return true
+end
+
+local function afterPropertyChange(obj, propName)
+    if propName == "Name" then
+        invalidateExplorer()
+        updateStatus()
+    end
+end
+
+-- //////////////////////////////////////////////////////////////////////////
+-- PROPERTIES PANEL
+-- //////////////////////////////////////////////////////////////////////////
+
+PropPanel = {}
+do
+    local scroll
+    local placeholder
+    local rows = {}
+    local rowOrder = 0
+
+    local function clearRows()
+        rows = {}
+        if scroll then
+            for _, child in ipairs(scroll:GetChildren()) do
+                if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+                    child:Destroy()
+                end
+            end
+        end
+        rowOrder = 0
+    end
+
+    local function addSection(title)
+        rowOrder += 1
+        create("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 22),
+            BackgroundTransparency = 1,
+            Text = string.upper(title),
+            TextColor3 = THEME.Accent,
+            Font = Enum.Font.GothamBold,
+            TextSize = 10,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            LayoutOrder = rowOrder,
+            ZIndex = 12,
+        }, scroll)
+    end
+
+    local function makeValueBox(row)
+        local box = create("TextBox", {
+            BackgroundColor3 = THEME.Control,
+            TextColor3 = THEME.Text,
+            PlaceholderColor3 = THEME.TextDim,
+            Font = Enum.Font.Gotham,
+            TextSize = 12,
+            Text = "",
+            ClearTextOnFocus = false,
+            BorderSizePixel = 0,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            ZIndex = 13,
+        }, row)
+        create("UICorner", { CornerRadius = UDim.new(0, 4) }, box)
+        create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, box)
+        create("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 4) }, box)
+        return box
+    end
+
+    local function addPropRow(obj, propName, ptype)
+        rowOrder += 1
+        local row = create("Frame", {
+            Size = UDim2.new(1, 0, 0, 26),
+            BackgroundTransparency = 1,
+            LayoutOrder = rowOrder,
+            ZIndex = 12,
+        }, scroll)
+
+        create("TextLabel", {
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(2, 0),
+            Size = UDim2.new(0, 128, 1, 0),
+            Text = propName,
+            TextColor3 = THEME.TextDim,
+            Font = Enum.Font.Gotham,
+            TextSize = 12,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            ZIndex = 13,
+        }, row)
+
+        if ptype == "bool" then
+            local toggle = create("TextButton", {
+                Position = UDim2.fromOffset(134, 3),
+                Size = UDim2.fromOffset(64, 20),
+                BackgroundColor3 = THEME.Control,
+                BorderSizePixel = 0,
+                TextColor3 = THEME.Text,
+                Font = Enum.Font.GothamBold,
+                TextSize = 12,
+                AutoButtonColor = false,
+                Text = "false",
+                ZIndex = 13,
+            }, row)
+            create("UICorner", { CornerRadius = UDim.new(0, 4) }, toggle)
+            create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, toggle)
+
+            local function refresh()
+                local ok, value = pcall(function() return obj[propName] end)
+                if not ok then return end
+                toggle.Text = value and "true" or "false"
+                toggle.BackgroundColor3 = value and THEME.Good or THEME.Control
+            end
+            toggle.Activated:Connect(function()
+                local ok, value = pcall(function() return obj[propName] end)
+                if ok then
+                    local applied = pcall(function() obj[propName] = not value end)
+                    if applied then
+                        afterPropertyChange(obj, propName)
+                    end
+                end
+                refresh()
+            end)
+            refresh()
+            rows[propName] = refresh
+        else
+            local swatch
+            if ptype == "color" then
+                swatch = create("Frame", {
+                    Position = UDim2.fromOffset(134, 4),
+                    Size = UDim2.fromOffset(18, 18),
+                    BackgroundColor3 = Color3.new(1, 1, 1),
+                    BorderSizePixel = 0,
+                    ZIndex = 13,
+                }, row)
+                create("UICorner", { CornerRadius = UDim.new(0, 4) }, swatch)
+                create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, swatch)
+            end
+
+            local box = makeValueBox(row)
+            if swatch then
+                box.Position = UDim2.fromOffset(158, 3)
+                box.Size = UDim2.new(1, -164, 0, 20)
+            else
+                box.Position = UDim2.fromOffset(134, 3)
+                box.Size = UDim2.new(1, -140, 0, 20)
+            end
+
+            local function refresh()
+                if box:IsFocused() then return end
+                local ok, value = pcall(function() return obj[propName] end)
+                if not ok then return end
+                box.Text = formatValue(ptype, value)
+                if swatch then
+                    pcall(function() swatch.BackgroundColor3 = value end)
+                end
+            end
+
+            box.FocusLost:Connect(function()
+                local applied = applyProperty(obj, propName, box.Text, ptype)
+                if applied then
+                    afterPropertyChange(obj, propName)
+                end
+                refresh()
+            end)
+            refresh()
+            rows[propName] = refresh
+        end
+    end
+
+    local GROUP_TITLES = {
+        base = "Appearance", text = "Text", button = "Button", textbox = "TextBox",
+        image = "Image", scroll = "Scrolling", corner = "UICorner", stroke = "UIStroke",
+        list = "UIListLayout", grid = "UIGridLayout", padding = "UIPadding",
+        scale = "UIScale", canvas = "CanvasGroup", screengui = "ScreenGui",
+    }
+
+    function PropPanel.build(obj)
+        clearRows()
+        placeholder.Visible = (obj == nil)
+        scroll.Visible = (obj ~= nil)
+        if not obj then
+            return
+        end
+
+        addSection("Data")
+        addPropRow(obj, "Name", "string")
+
+        local groups = CLASS_GROUPS[obj.ClassName] or { "base" }
+        for _, groupKey in ipairs(groups) do
+            local propList = PROP_GROUPS[groupKey]
+            if propList then
+                addSection(GROUP_TITLES[groupKey] or groupKey)
+                for _, propName in ipairs(propList) do
+                    addPropRow(obj, propName, PROP_TYPES[propName] or "string")
+                end
+            end
+        end
+    end
+
+    function PropPanel.refresh(propName)
+        local refresh = rows[propName]
+        if refresh then
+            pcall(refresh)
+        end
+    end
+
+    function PropPanel.init()
+        scroll = UI.makeScrollList(UI.propertiesColumn, 24)
+        placeholder = create("TextLabel", {
+            Size = UDim2.new(1, -16, 1, -30),
+            Position = UDim2.fromOffset(8, 24),
+            BackgroundTransparency = 1,
+            Text = "Select an instance in the viewport or Explorer\nto edit its properties.",
+            TextColor3 = THEME.TextDim,
+            Font = Enum.Font.Gotham,
+            TextSize = 12,
+            TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Center,
+            TextYAlignment = Enum.TextYAlignment.Center,
+            ZIndex = 12,
+        }, UI.propertiesColumn)
+    end
+end
+
+-- //////////////////////////////////////////////////////////////////////////
+-- TOOLBOX (INSERT PANEL)
+-- //////////////////////////////////////////////////////////////////////////
+
+local CLASS_COLORS = {
+    ScreenGui      = Color3.fromRGB(86, 156, 214),
+    Frame          = Color3.fromRGB(158, 158, 170),
+    ScrollingFrame = Color3.fromRGB(120, 150, 210),
+    CanvasGroup    = Color3.fromRGB(150, 130, 210),
+    TextLabel      = Color3.fromRGB(225, 200, 100),
+    TextButton     = Color3.fromRGB(105, 190, 120),
+    TextBox        = Color3.fromRGB(230, 150, 90),
+    ImageLabel     = Color3.fromRGB(190, 120, 205),
+    ImageButton    = Color3.fromRGB(190, 120, 205),
+    UICorner       = Color3.fromRGB(235, 195, 90),
+    UIStroke       = Color3.fromRGB(235, 195, 90),
+    UIListLayout   = Color3.fromRGB(235, 195, 90),
+    UIGridLayout   = Color3.fromRGB(235, 195, 90),
+    UIPadding      = Color3.fromRGB(235, 195, 90),
+    UIScale        = Color3.fromRGB(235, 195, 90),
+}
+
+local CATALOG = {
+    "ScreenGui", "Frame", "ScrollingFrame", "CanvasGroup",
+    "TextLabel", "TextButton", "TextBox", "ImageLabel", "ImageButton",
+    "UICorner", "UIStroke", "UIListLayout", "UIGridLayout", "UIPadding", "UIScale",
+}
+
+local SPAWN_DEFAULTS = {
+    Frame = function(inst, x, y)
+        inst.Size = UDim2.fromOffset(220, 140)
+        inst.Position = UDim2.fromOffset(x, y)
+        inst.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
+        inst.BorderSizePixel = 0
+    end,
+    ScrollingFrame = function(inst, x, y)
+        inst.Size = UDim2.fromOffset(260, 200)
+        inst.Position = UDim2.fromOffset(x, y)
+        inst.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
+        inst.BorderSizePixel = 0
+        inst.ScrollBarThickness = 4
+        inst.CanvasSize = UDim2.new()
+    end,
+    CanvasGroup = function(inst, x, y)
+        inst.Size = UDim2.fromOffset(220, 140)
+        inst.Position = UDim2.fromOffset(x, y)
+        inst.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
+        inst.BorderSizePixel = 0
+    end,
+    TextLabel = function(inst, x, y)
+        inst.Size = UDim2.fromOffset(200, 50)
+        inst.Position = UDim2.fromOffset(x, y)
+        inst.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
+        inst.BorderSizePixel = 0
+        inst.Text = "Label"
+        inst.TextColor3 = Color3.fromRGB(235, 235, 240)
+        inst.Font = Enum.Font.GothamMedium
+        inst.TextSize = 16
+    end,
+    TextButton = function(inst, x, y)
+        inst.Size = UDim2.fromOffset(150, 42)
+        inst.Position = UDim2.fromOffset(x, y)
+        inst.BackgroundColor3 = Color3.fromRGB(0, 120, 215)
+        inst.BorderSizePixel = 0
+        inst.Text = "Button"
+        inst.TextColor3 = Color3.fromRGB(255, 255, 255)
+        inst.Font = Enum.Font.GothamBold
+        inst.TextSize = 15
+    end,
+    TextBox = function(inst, x, y)
+        inst.Size = UDim2.fromOffset(180, 36)
+        inst.Position = UDim2.fromOffset(x, y)
+        inst.BackgroundColor3 = Color3.fromRGB(235, 235, 240)
+        inst.BorderSizePixel = 0
+        inst.Text = ""
+        inst.PlaceholderText = "Type here..."
+        inst.TextColor3 = Color3.fromRGB(25, 25, 30)
+        inst.PlaceholderColor3 = Color3.fromRGB(120, 120, 130)
+        inst.Font = Enum.Font.Gotham
+        inst.TextSize = 14
+        inst.ClearTextOnFocus = false
+    end,
+    ImageLabel = function(inst, x, y)
+        inst.Size = UDim2.fromOffset(160, 160)
+        inst.Position = UDim2.fromOffset(x, y)
+        inst.BackgroundColor3 = Color3.fromRGB(58, 58, 68)
+        inst.BorderSizePixel = 0
+    end,
+    ImageButton = function(inst, x, y)
+        inst.Size = UDim2.fromOffset(120, 120)
+        inst.Position = UDim2.fromOffset(x, y)
+        inst.BackgroundColor3 = Color3.fromRGB(58, 58, 68)
+        inst.BorderSizePixel = 0
+    end,
+    UICorner = function(inst)
+        inst.CornerRadius = UDim.new(0, 8)
+    end,
+    UIStroke = function(inst)
+        inst.Thickness = 1
+        inst.Color = Color3.fromRGB(255, 255, 255)
+    end,
+    UIListLayout = function(inst)
+        inst.Padding = UDim.new(0, 6)
+        inst.SortOrder = Enum.SortOrder.LayoutOrder
+    end,
+    UIGridLayout = function(inst)
+        inst.CellSize = UDim2.fromOffset(64, 64)
+        inst.CellPadding = UDim2.fromOffset(6, 6)
+        inst.SortOrder = Enum.SortOrder.LayoutOrder
+    end,
+    UIPadding = function() end,
+    UIScale = function() end,
+}
+
+local function resolveSpawnParent(class)
+    local isLayoutComponent = class:sub(1, 2) == "UI"
+    local sel = State.selected
+    if isLayoutComponent then
+        if sel and sel.Parent and sel:IsA("GuiObject") then
+            return sel
+        end
+        return nil, "Select a Frame/Button (GuiObject) before adding " .. class
+    end
+    if sel and sel.Parent then
+        if sel:IsA("ScreenGui") or sel:IsA("GuiObject") then
+            return sel
+        end
+        local parent = sel.Parent
+        if parent:IsA("GuiObject") or parent:IsA("ScreenGui") then
+            return parent
+        end
+    end
+    local guis = getProjectScreenGuis()
+    if guis[1] then
+        return guis[1]
+    end
+    return createProjectScreenGui()
+end
+
+function Editor.spawnClass(class)
+    if class == "ScreenGui" then
+        local sg = createProjectScreenGui()
+        invalidateExplorer()
+        Editor.select(sg)
+        notify("Created ScreenGui '" .. sg.Name .. "'", "success")
+        return sg
+    end
+
+    local parent, err = resolveSpawnParent(class)
+    if not parent then
+        notify(err or ("Cannot spawn " .. class), "warn")
+        return nil
+    end
+
+    local inst = Instance.new(class)
+    inst.Name = uniqueName(class)
+    local decorator = SPAWN_DEFAULTS[class]
+    if decorator then
+        State.spawnCascade = (State.spawnCascade + 1) % 8
+        local cascade = State.spawnCascade * 16
+        pcall(function() decorator(inst, 24 + cascade, 24 + cascade) end)
+    end
+    pcall(function() inst.Parent = parent end)
+    invalidateExplorer()
+    Editor.select(inst)
+    return inst
+end
+
+-- Build the toolbox list.
+UI.makeColumnHeader(UI.toolboxColumn, "INSERT")
+do
+    local toolboxScroll = UI.makeScrollList(UI.toolboxColumn, 24)
+    for order, class in ipairs(CATALOG) do
+        local btn = create("TextButton", {
+            Size = UDim2.new(1, 0, 0, 26),
+            BackgroundColor3 = THEME.Control,
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            AutoButtonColor = false,
+            Text = "",
+            LayoutOrder = order,
+            ZIndex = 12,
+        }, toolboxScroll)
+        local icon = create("Frame", {
+            Size = UDim2.fromOffset(10, 10),
+            Position = UDim2.fromOffset(8, 8),
+            BackgroundColor3 = CLASS_COLORS[class] or THEME.TextDim,
+            BorderSizePixel = 0,
+            ZIndex = 13,
+        }, btn)
+        create("UICorner", { CornerRadius = UDim.new(0, 2) }, icon)
+        create("TextLabel", {
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(26, 0),
+            Size = UDim2.new(1, -32, 1, 0),
+            Text = class,
+            TextColor3 = Color3.fromRGB(205, 205, 214),
+            Font = Enum.Font.Gotham,
+            TextSize = 12,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            ZIndex = 13,
+        }, btn)
+        btn.MouseEnter:Connect(function()
+            btn.BackgroundTransparency = 0
+        end)
+        btn.MouseLeave:Connect(function()
+            btn.BackgroundTransparency = 1
+        end)
+        btn.Activated:Connect(function()
+            Editor.spawnClass(class)
+        end)
+    end
+end
+
+-- //////////////////////////////////////////////////////////////////////////
+-- EXPLORER (hierarchy tree)
+-- //////////////////////////////////////////////////////////////////////////
+
+local explorerRows = setmetatable({}, { __mode = "k" })
+local watchers = setmetatable({}, { __mode = "k" })
+local explorerDirty = false
+local rebuildExplorer
+
+local function disconnectWatcherList(list)
+    if not list then return end
+    for _, connection in ipairs(list) do
+        pcall(function() connection:Disconnect() end)
+    end
+end
+
+local function clearWatchersBelow(root)
+    local function walk(inst)
+        disconnectWatcherList(watchers[inst])
+        watchers[inst] = nil
+        for _, child in ipairs(inst:GetChildren()) do
+            walk(child)
+        end
+    end
+    pcall(walk, root)
+end
+
+local function clearAllWatchers()
+    for inst in pairs(watchers) do
+        disconnectWatcherList(watchers[inst])
+    end
+    watchers = setmetatable({}, { __mode = "k" })
+end
+
+local function watchInstance(inst)
+    if watchers[inst] then return end
+    local list = {}
+    local ok = pcall(function()
+        list[#list + 1] = inst.ChildAdded:Connect(function()
+            invalidateExplorer()
+        end)
+        list[#list + 1] = inst.ChildRemoved:Connect(function(child)
+            -- Deselect if the removed instance (or an ancestor of it) was selected.
+            if State.selected then
+                local current = State.selected
+                while current do
+                    if current == child then
+                        Editor.select(nil)
+                        break
+                    end
+                    current = current.Parent
+                end
+            end
+            clearWatchersBelow(child)
+            invalidateExplorer()
+        end)
+        list[#list + 1] = inst.AncestryChanged:Connect(function(_, parent)
+            if not parent then
+                clearWatchersBelow(inst)
+                if State.selected == inst then
+                    Editor.select(nil)
+                end
+                invalidateExplorer()
+            end
+        end)
+    end)
+    if ok then
+        watchers[inst] = list
+    end
+end
+
+invalidateExplorer = function()
+    explorerDirty = true
+end
+
+rebuildExplorer = function()
+    if not explorerScroll then return end
+    local savedScroll = explorerScroll.CanvasPosition
+    clearAllWatchers()
+    for _, child in ipairs(explorerScroll:GetChildren()) do
+        if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+            child:Destroy()
+        end
+    end
+    for key in pairs(explorerRows) do
+        explorerRows[key] = nil
+    end
+
+    local function addNode(inst, depth)
+        watchInstance(inst)
+
+        local kids = treeChildren(inst)
+        local hasKids = #kids > 0
+        local isSelected = State.selected == inst
+
+        local row = create("TextButton", {
+            Size = UDim2.new(1, 0, 0, 22),
+            BackgroundColor3 = isSelected and THEME.Selection or THEME.Panel,
+            BackgroundTransparency = isSelected and 0 or 1,
+            BorderSizePixel = 0,
+            AutoButtonColor = false,
+            Text = "",
+            LayoutOrder = depth * 1000 + #explorerRows,
+            ZIndex = 12,
+        }, explorerScroll)
+
+        local indent = 6 + depth * 14
+        if hasKids then
+            local arrow = create("TextButton", {
+                Size = UDim2.fromOffset(14, 14),
+                Position = UDim2.fromOffset(indent, 4),
+                BackgroundTransparency = 1,
+                Text = State.collapsed[inst] and "+" or "-",
+                TextColor3 = THEME.TextDim,
+                Font = Enum.Font.GothamBold,
+                TextSize = 12,
+                ZIndex = 13,
+            }, row)
+            arrow.Activated:Connect(function()
+                if State.collapsed[inst] then
+                    State.collapsed[inst] = nil
+                else
+                    State.collapsed[inst] = true
+                end
+                rebuildExplorer()
+            end)
+        end
+
+        local icon = create("Frame", {
+            Size = UDim2.fromOffset(10, 10),
+            Position = UDim2.fromOffset(indent + (hasKids and 17 or 3), 6),
+            BackgroundColor3 = CLASS_COLORS[inst.ClassName] or THEME.TextDim,
+            BorderSizePixel = 0,
+            ZIndex = 13,
+        }, row)
+        create("UICorner", { CornerRadius = UDim.new(0, 2) }, icon)
+
+        create("TextLabel", {
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(indent + (hasKids and 31 or 17), 0),
+            Size = UDim2.new(1, -(indent + (hasKids and 37 or 23)), 1, 0),
+            Text = inst.Name,
+            TextColor3 = isSelected and THEME.Text or Color3.fromRGB(205, 205, 214),
+            Font = Enum.Font.Gotham,
+            TextSize = 12,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            ZIndex = 13,
+        }, row)
+
+        row.Activated:Connect(function()
+            Editor.select(inst)
+        end)
+
+        explorerRows[inst] = { frame = row }
+
+        if not State.collapsed[inst] then
+            for _, child in ipairs(kids) do
+                addNode(child, depth + 1)
+            end
+        end
+    end
+
+    for _, sg in ipairs(getProjectScreenGuis()) do
+        addNode(sg, 0)
+    end
+
+    explorerScroll.CanvasPosition = savedScroll
+end
+
+refreshExplorerSelection = function()
+    for inst, refs in pairs(explorerRows) do
+        local isSelected = State.selected == inst
+        if refs.frame then
+            refs.frame.BackgroundColor3 = isSelected and THEME.Selection or THEME.Panel
+            refs.frame.BackgroundTransparency = isSelected and 0 or 1
+        end
+    end
+end
+
+-- //////////////////////////////////////////////////////////////////////////
+-- STATUS BAR
+-- //////////////////////////////////////////////////////////////////////////
+
+updateStatus = function()
+    if UI.statusRight then
+        local sel = State.selected
+        if sel and sel.Parent then
+            UI.statusRight.Text = sel.Name .. "   (" .. sel.ClassName .. ")"
+        else
+            UI.statusRight.Text = "No selection"
+        end
+    end
+    if UI.statusLeft then
+        UI.statusLeft.Text = State.editMode
+            and "EDIT — click to select · drag to move · handles resize · [Del] deletes"
+            or "TEST — editing paused; interact with your GUI"
+    end
+end
+
+-- //////////////////////////////////////////////////////////////////////////
+-- VIEWPORT MANIPULATION (hit-test / drag / resize)
+-- //////////////////////////////////////////////////////////////////////////
+
+local MIN_SIZE = 4
+
+local function isValidTarget(inst)
+    return typeof(inst) == "Instance" and inst.Parent ~= nil
+end
+
+local function isInstanceShown(inst)
+    local current = inst
+    while current do
+        if current:IsA("GuiObject") and current.Visible == false then
+            return false
+        end
+        if current:IsA("LayerCollector") and current.Enabled == false then
+            return false
+        end
+        current = current.Parent
+    end
+    return true
+end
+
+-- Fully transparent containers don't swallow clicks; select them via Explorer.
+local function isVisuallyHittable(inst)
+    local ok, transparent = pcall(function() return inst.BackgroundTransparency end)
+    if ok and transparent ~= nil and transparent >= 0.99 then
+        local hasContent = false
+        if inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox") then
+            local okT, text = pcall(function() return inst.Text end)
+            local okTT, textTrans = pcall(function() return inst.TextTransparency end)
+            if okT and text and text ~= "" and (not okTT or (textTrans or 0) < 0.99) then
+                hasContent = true
+            end
+        end
+        if not hasContent and (inst:IsA("ImageLabel") or inst:IsA("ImageButton")) then
+            local okI, image = pcall(function() return inst.Image end)
+            local okIT, imageTrans = pcall(function() return inst.ImageTransparency end)
+            if okI and image and image ~= "" and (not okIT or (imageTrans or 0) < 0.99) then
+                hasContent = true
+            end
+        end
+        if not hasContent then
+            return false
+        end
+    end
+    return true
+end
+
+local function hitTest(screenPos)
+    local best, bestScore
+    for _, sg in ipairs(getProjectScreenGuis()) do
+        local function walk(inst, depth)
+            for _, child in ipairs(treeChildren(inst)) do
+                if child:IsA("GuiObject") and isInstanceShown(child) and isVisuallyHittable(child) then
+                    local ok, origin, size = pcall(function()
+                        return absToScreen(sg, child.AbsolutePosition), child.AbsoluteSize
+                    end)
+                    if ok and origin and size and size.X > 0 and size.Y > 0
+                        and screenPos.X >= origin.X and screenPos.X <= origin.X + size.X
+                        and screenPos.Y >= origin.Y and screenPos.Y <= origin.Y + size.Y then
+                        local z = 1
+                        pcall(function() z = child.ZIndex end)
+                        local score = depth * 1000 + z -- deepest, then highest ZIndex
+                        if not bestScore or score >= bestScore then
+                            best, bestScore = child, score
+                        end
+                    end
+                end
+                walk(child, depth + 1)
+            end
+        end
+        walk(sg, 0)
+    end
+    return best
+end
+
+local function isOverEditorSurface(screenPos)
+    for _, window in ipairs(UI.windows) do
+        if window.Visible then
+            local ok, ap, as = pcall(function()
+                return window.AbsolutePosition, window.AbsoluteSize
+            end)
+            if ok and ap and as
+                and screenPos.X >= ap.X and screenPos.X <= ap.X + as.X
+                and screenPos.Y >= ap.Y and screenPos.Y <= ap.Y + as.Y then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function beginDrag(inst, inputObject)
+    if not inst:IsA("GuiObject") then return end
+    local ok, startPos = pcall(function() return inst.Position end)
+    if not ok then return end
+    State.dragging = {
+        obj = inst,
+        startMouse = inputScreenPos(inputObject),
+        startPos = startPos,
+    }
+end
+
+function Editor.beginResize(direction, inputObject)
+    local inst = State.selected
+    if not inst or not inst.Parent or not inst:IsA("GuiObject") or not State.editMode then
+        return
+    end
+    local okPos, startPos = pcall(function() return inst.Position end)
+    local okSize, startSize = pcall(function() return inst.Size end)
+    if not okPos or not okSize then return end
+    State.resizing = {
+        obj = inst,
+        dir = direction,
+        startMouse = inputScreenPos(inputObject),
+        startPos = startPos,
+        startSize = startSize,
+    }
+end
+
+local function applyDrag()
+    local drag = State.dragging
+    if not isValidTarget(drag.obj) then
+        State.dragging = nil
+        return
+    end
+    local delta = inputScreenPos() - drag.startMouse
+    local p = drag.startPos
+    pcall(function()
+        drag.obj.Position = UDim2.new(
+            p.X.Scale, p.X.Offset + delta.X,
+            p.Y.Scale, p.Y.Offset + delta.Y
+        )
+    end)
+    PropPanel.refresh("Position")
+end
+
+local function applyResize()
+    local resize = State.resizing
+    if not isValidTarget(resize.obj) then
+        State.resizing = nil
+        return
+    end
+    local delta = inputScreenPos() - resize.startMouse
+    local dir = resize.dir
+    local p, s = resize.startPos, resize.startSize
+
+    local xOffset, yOffset = p.X.Offset, p.Y.Offset
+    local wOffset, hOffset = s.X.Offset, s.Y.Offset
+    local hasL = dir:find("L") ~= nil
+    local hasT = dir:find("T") ~= nil
+    local hasR = dir:find("R") ~= nil
+    local hasB = dir:find("B") ~= nil
+
+    if hasL then
+        local newW = wOffset - delta.X
+        local newX = xOffset + delta.X
+        if newW < MIN_SIZE then
+            newX = xOffset + wOffset - MIN_SIZE
+            newW = MIN_SIZE
+        end
+        xOffset, wOffset = newX, newW
+    end
+    if hasR then
+        wOffset = math.max(wOffset + delta.X, MIN_SIZE)
+    end
+    if hasT then
+        local newH = hOffset - delta.Y
+        local newY = yOffset + delta.Y
+        if newH < MIN_SIZE then
+            newY = yOffset + hOffset - MIN_SIZE
+            newH = MIN_SIZE
+        end
+        yOffset, hOffset = newY, newH
+    end
+    if hasB then
+        hOffset = math.max(hOffset + delta.Y, MIN_SIZE)
+    end
+
+    pcall(function()
+        resize.obj.Position = UDim2.new(p.X.Scale, xOffset, p.Y.Scale, yOffset)
+        resize.obj.Size = UDim2.new(s.X.Scale, wOffset, s.Y.Scale, hOffset)
+    end)
+    PropPanel.refresh("Position")
+    PropPanel.refresh("Size")
+end
+
+-- Selection clicks (works even on Active elements like TextButtons, because we
+-- hit-test geometrically instead of relying on gameProcessedEvent).
+trackConnection(UserInputService.InputBegan:Connect(function(input)
+    local inputType = input.UserInputType
+    if inputType ~= Enum.UserInputType.MouseButton1 and inputType ~= Enum.UserInputType.Touch then
+        return
+    end
+    if not State.editMode then return end
+    if State.dragging or State.resizing then return end
+
+    local screenPos = inputScreenPos(input)
+    if isOverEditorSurface(screenPos) or isOverHandle(screenPos) then
+        return
+    end
+
+    local target = hitTest(screenPos)
+    if target then
+        Editor.select(target)
+        if not target:IsA("TextBox") then
+            beginDrag(target, input) -- TextBoxes are select-only so you can type in them
+        end
+    else
+        Editor.select(nil)
+    end
+end))
+
+trackConnection(UserInputService.InputChanged:Connect(function(input)
+    local inputType = input.UserInputType
+    if inputType ~= Enum.UserInputType.MouseMovement and inputType ~= Enum.UserInputType.Touch then
+        return
+    end
+    if State.windowDrag then
+        local delta = inputScreenPos(input) - State.windowDrag.startMouse
+        UI.main.Position = UDim2.fromOffset(
+            State.windowDrag.startPosition.X.Offset + delta.X,
+            State.windowDrag.startPosition.Y.Offset + delta.Y
+        )
+    elseif State.dragging then
+        applyDrag()
+    elseif State.resizing then
+        applyResize()
+    end
+end))
+
+trackConnection(UserInputService.InputEnded:Connect(function(input)
+    local inputType = input.UserInputType
+    if inputType == Enum.UserInputType.MouseButton1 or inputType == Enum.UserInputType.Touch then
+        State.dragging = nil
+        State.resizing = nil
+        State.windowDrag = nil
+    end
+end))
+
+trackConnection(UserInputService.WindowFocusReleased:Connect(function()
+    State.dragging = nil
+    State.resizing = nil
+    State.windowDrag = nil
+end))
+
+-- Delete key shortcut (ignored while typing in a TextBox).
+trackConnection(UserInputService.InputBegan:Connect(function(input)
+    if input.KeyCode ~= Enum.KeyCode.Delete then return end
+    local ok, focused = pcall(function() return UserInputService:GetFocusedTextBox() end)
+    if ok and focused then return end
+    if State.editMode then
+        Editor.deleteSelected()
+    end
+end))
+
+-- //////////////////////////////////////////////////////////////////////////
+-- LUAU EXPORTER
+-- //////////////////////////////////////////////////////////////////////////
+
+local EXPORT_KEYWORDS = {
+    ["and"]=true, ["break"]=true, ["do"]=true, ["else"]=true, ["elseif"]=true, ["end"]=true,
+    ["false"]=true, ["for"]=true, ["function"]=true, ["if"]=true, ["in"]=true, ["local"]=true,
+    ["nil"]=true, ["not"]=true, ["or"]=true, ["repeat"]=true, ["return"]=true, ["then"]=true,
+    ["true"]=true, ["until"]=true, ["while"]=true, ["continue"]=true,
+}
+local EXPORT_RESERVED = {
+    game=true, workspace=true, script=true, Instance=true, Enum=true, UDim=true, UDim2=true,
+    Color3=true, Vector2=true, Vector3=true, CFrame=true, TweenInfo=true, Players=true,
+    player=true, playerGui=true, task=true, math=true, table=true, string=true, os=true,
+    pairs=true, ipairs=true, print=true, warn=true, wait=true, spawn=true, tostring=true,
+}
+
+local defaultInstances = {}
+local function defaultInstanceOf(className)
+    local cached = defaultInstances[className]
+    if cached == nil then
+        local ok, inst = pcall(function() return Instance.new(className) end)
+        cached = ok and inst or false
+        defaultInstances[className] = cached
+    end
+    return cached or nil
+end
+
+local function valueToLuau(value)
+    local kind = typeof(value)
+    if kind == "string" then
+        local ok, encoded = pcall(string.format, "%q", value)
+        return ok and encoded or '""'
+    elseif kind == "number" then
+        return trimNum(value)
+    elseif kind == "boolean" then
+        return tostring(value)
+    elseif kind == "Color3" then
+        return ("Color3.fromRGB(%d, %d, %d)"):format(
+            math.floor(value.R * 255 + 0.5),
+            math.floor(value.G * 255 + 0.5),
+            math.floor(value.B * 255 + 0.5))
+    elseif kind == "UDim2" then
+        return ("UDim2.new(%s, %s, %s, %s)"):format(
+            trimNum(value.X.Scale), trimNum(value.X.Offset),
+            trimNum(value.Y.Scale), trimNum(value.Y.Offset))
+    elseif kind == "UDim" then
+        return ("UDim.new(%s, %s)"):format(trimNum(value.Scale), trimNum(value.Offset))
+    elseif kind == "Vector2" then
+        return ("Vector2.new(%s, %s)"):format(trimNum(value.X), trimNum(value.Y))
+    elseif kind == "EnumItem" then
+        return tostring(value)
+    end
+    return nil
+end
+
+local function exportPropertyNameList(className)
+    local list = { "Name" }
+    local groups = CLASS_GROUPS[className]
+    if groups then
+        for _, groupKey in ipairs(groups) do
+            local props = PROP_GROUPS[groupKey]
+            if props then
+                for _, propName in ipairs(props) do
+                    if propName ~= "Name" then
+                        table.insert(list, propName)
+                    end
+                end
+            end
+        end
+    else
+        list = { "Name", "Position", "Size", "BackgroundColor3", "BackgroundTransparency", "Visible" }
+    end
+    local seen, final = {}, {}
+    for _, propName in ipairs(list) do
+        if not seen[propName] then
+            seen[propName] = true
+            table.insert(final, propName)
+        end
+    end
+    return final
+end
+
+local function generateExportCode()
+    local guis = getProjectScreenGuis()
+    if #guis == 0 then
+        return nil
+    end
+
+    local variableOf = {}
+    local usedNames = {}
+    local nameCounters = {}
+    local totalInstances = 0
+
+    local function assignVariables(inst, depth)
+        totalInstances += 1
+        local base = tostring(inst.Name):gsub("[^%w_]", "_")
+        if base:match("^%d") then
+            base = "_" .. base
+        end
+        if EXPORT_KEYWORDS[base] or EXPORT_RESERVED[base] then
+            base = base .. "_"
+        end
+        nameCounters[base] = (nameCounters[base] or 0) + 1
+        local candidate = nameCounters[base] == 1 and base or (base .. tostring(nameCounters[base]))
+        while usedNames[candidate] do
+            nameCounters[base] += 1
+            candidate = base .. tostring(nameCounters[base])
+        end
+        usedNames[candidate] = true
+        variableOf[inst] = { name = candidate, depth = depth }
+        for _, child in ipairs(treeChildren(inst)) do
+            assignVariables(child, depth + 1)
+        end
+    end
+    for _, sg in ipairs(guis) do
+        assignVariables(sg, 0)
+    end
+
+    local lines = {}
+    local function emit(text)
+        lines[#lines + 1] = text
+    end
+
+    emit("--[[")
+    emit("\tGenerated by StudioGUI Creator — WYSIWYG GUI Editor")
+    emit(("\tExported: %s  |  Instances: %d  |  Executor: %s"):format(
+        os.date("%Y-%m-%d %H:%M:%S"), totalInstances, Executor.name))
+    emit("")
+    emit("\tRun as a LocalScript (or paste into your executor).")
+    emit("\tRebuilds the entire GUI under the LocalPlayer's PlayerGui.")
+    emit("]]")
+    emit("")
+    emit("local Players = game:GetService(\"Players\")")
+    emit("local playerGui = Players.LocalPlayer:WaitForChild(\"PlayerGui\")")
+    emit("")
+
+    for _, sg in ipairs(guis) do
+        local function emitInstance(inst)
+            local info = variableOf[inst]
+            local indent = string.rep("\t", info.depth)
+            local varName = info.name
+
+            emit(indent .. ("local %s = Instance.new(\"%s\")"):format(varName, inst.ClassName))
+
+            local isRootGui = inst:IsA("ScreenGui")
+            for _, propName in ipairs(exportPropertyNameList(inst.ClassName)) do
+                local okValue, value = pcall(function() return inst[propName] end)
+                if okValue then
+                    -- Only emit properties that differ from a fresh default (clean output).
+                    local skip = false
+                    local defaultInst = defaultInstanceOf(inst.ClassName)
+                    if defaultInst then
+                        local okDefault, defaultValue = pcall(function() return defaultInst[propName] end)
+                        if okDefault and defaultValue == value then
+                            skip = true
+                        end
+                    end
+                    if not skip then
+                        local code = valueToLuau(value)
+                        if code then
+                            emit(indent .. ("%s.%s = %s"):format(varName, propName, code))
+                        end
+                    end
+                end
+            end
+            if isRootGui then
+                emit(indent .. ("%s.ResetOnSpawn = false -- survive respawn"):format(varName))
+            end
+
+            local parentVar = "playerGui"
+            if not isRootGui and variableOf[inst.Parent] then
+                parentVar = variableOf[inst.Parent].name
+            end
+            emit(indent .. ("%s.Parent = %s"):format(varName, parentVar))
+            emit("")
+
+            for _, child in ipairs(treeChildren(inst)) do
+                emitInstance(child)
+            end
+        end
+        emitInstance(sg)
+    end
+
+    emit(("-- End of export: %d instances."):format(totalInstances))
+    return table.concat(lines, "\n")
+end
+
+-- Export modal (code viewer + copy/save).
+do
+    local modal = create("Frame", {
+        Name = "ExportModal",
+        Size = UDim2.fromOffset(620, 460),
+        Position = UDim2.fromOffset(80, 90),
+        BackgroundColor3 = THEME.Window,
+        BorderSizePixel = 0,
+        Visible = false,
+        Active = true,
+        ZIndex = 60,
+    }, Overlay)
+    create("UICorner", { CornerRadius = UDim.new(0, 8) }, modal)
+    create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, modal)
+
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(14, 0),
+        Size = UDim2.new(1, -330, 0, 32),
+        Text = "Luau Export",
+        TextColor3 = THEME.Text,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 61,
+    }, modal)
+
+    local function modalButton(text, offsetX, onClick, accent)
+        local btn = create("TextButton", {
+            Size = UDim2.fromOffset(84, 22),
+            Position = UDim2.new(1, offsetX, 0, 5),
+            BackgroundColor3 = accent and THEME.Accent or THEME.Control,
+            BorderSizePixel = 0,
+            Text = text,
+            TextColor3 = THEME.Text,
+            Font = Enum.Font.GothamMedium,
+            TextSize = 12,
+            AutoButtonColor = false,
+            ZIndex = 61,
+        }, modal)
+        create("UICorner", { CornerRadius = UDim.new(0, 5) }, btn)
+        btn.Activated:Connect(onClick)
+        return btn
+    end
+
+    local codeScroll = create("ScrollingFrame", {
+        Position = UDim2.fromOffset(8, 38),
+        Size = UDim2.new(1, -16, 1, -76),
+        BackgroundColor3 = Color3.fromRGB(18, 18, 22),
+        BorderSizePixel = 0,
+        CanvasSize = UDim2.new(),
+        ScrollingDirection = Enum.ScrollingDirection.XY,
+        ScrollBarThickness = 5,
+        ScrollBarImageColor3 = THEME.ControlHover,
+        ZIndex = 61,
+    }, modal)
+    create("UICorner", { CornerRadius = UDim.new(0, 6) }, codeScroll)
+    create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, codeScroll)
+
+    local codeBox = create("TextBox", {
+        Size = UDim2.fromOffset(400, 100),
+        Position = UDim2.fromOffset(5, 5),
+        BackgroundColor3 = Color3.fromRGB(18, 18, 22),
+        TextColor3 = Color3.fromRGB(200, 205, 215),
+        Font = Enum.Font.Code,
+        TextSize = 13,
+        Text = "",
+        MultiLine = true,
+        ClearTextOnFocus = false,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        TextWrapped = false,
+        BorderSizePixel = 0,
+        ZIndex = 62,
+    }, codeScroll)
+
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.new(0, 8, 1, -24),
+        Size = UDim2.new(1, -16, 0, 18),
+        Text = "Tip: click the code box, then Ctrl+A → Ctrl+C to copy manually.",
+        TextColor3 = THEME.TextDim,
+        Font = Enum.Font.Gotham,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 61,
+    }, modal)
+
+    local currentCode = ""
+
+    modalButton("Copy", -288, function()
+        if Executor.clipboard then
+            local ok = pcall(Executor.clipboard, currentCode)
+            notify(ok and "Copied export code to clipboard." or "Clipboard copy failed.",
+                ok and "success" or "error", 2.5)
+        else
+            notify("Clipboard API unavailable — click the code, Ctrl+A, Ctrl+C.", "warn", 4)
+        end
+    end, true)
+
+    modalButton("Save File", -196, function()
+        if not Executor.writefile then
+            notify("writefile is not available on this executor.", "warn", 3)
+            return
+        end
+        local ok, err = pcall(Executor.writefile, "studiogui_export.lua", currentCode)
+        notify(
+            ok and "Saved to workspace: studiogui_export.lua"
+                or ("Save failed: %s"):format(tostring(err)),
+            ok and "success" or "error", 3.5)
+    end)
+
+    modalButton("Close", -104, function()
+        modal.Visible = false
+    end)
+
+    function Editor.openExport()
+        local code = generateExportCode()
+        if not code then
+            notify("Nothing to export — create a GUI first.", "warn", 2.5)
+            return
+        end
+        currentCode = code
+
+        local lineCount = 1
+        for _ in code:gmatch("\n") do
+            lineCount += 1
+        end
+        local maxLen = 0
+        for line in code:gmatch("[^\n]+") do
+            if #line > maxLen then
+                maxLen = #line
+            end
+        end
+        local contentHeight = math.clamp(lineCount * 16 + 12, 100, 200000)
+        local contentWidth = math.max(maxLen * 8 + 24, 240)
+        codeBox.Size = UDim2.fromOffset(contentWidth, contentHeight)
+        codeScroll.CanvasSize = UDim2.fromOffset(contentWidth + 10, contentHeight + 12)
+
+        local ok = pcall(function() codeBox.Text = code end)
+        if not ok then
+            notify("Export too large to display — use Save File instead.", "warn", 4)
+        end
+        modal.Visible = true
+        notify(("Exported %d lines of Luau."):format(lineCount), "success", 2.5)
+    end
+
+    table.insert(UI.windows, modal)
+end
+
+-- //////////////////////////////////////////////////////////////////////////
+-- EDITOR ACTIONS
+-- //////////////////////////////////////////////////////////////////////////
+
+function Editor.select(inst)
+    if inst ~= nil and (typeof(inst) ~= "Instance" or inst.Parent == nil) then
+        inst = nil
+    end
+    State.selected = inst
+    refreshExplorerSelection()
+    PropPanel.build(inst)
+    updateStatus()
+end
+
+function Editor.deleteSelected()
+    local inst = State.selected
+    if not isValidTarget(inst) then
+        notify("Nothing selected.", "warn", 2)
+        return
+    end
+    -- ScreenGui protection: the last remaining ScreenGui cannot be deleted.
+    if inst:IsA("ScreenGui") then
+        local remaining = 0
+        for _, sg in ipairs(getProjectScreenGuis()) do
+            if sg ~= inst then
+                remaining += 1
+            end
+        end
+        if remaining == 0 then
+            notify("Protected: the project must keep at least one ScreenGui.", "error", 3.5)
+            return
+        end
+    end
+    local name = inst.Name
+    local ok = pcall(function() inst:Destroy() end)
+    if ok then
+        Editor.select(nil)
+        invalidateExplorer()
+        notify(("Deleted '%s'"):format(name), "info", 2)
+    else
+        notify("Failed to delete instance.", "error", 2.5)
+    end
+end
+
+function Editor.duplicateSelected()
+    local inst = State.selected
+    if not isValidTarget(inst) then
+        notify("Nothing selected.", "warn", 2)
+        return
+    end
+    local ok, clone = pcall(function() return inst:Clone() end)
+    if not ok or not clone then
+        notify("Cannot duplicate this instance.", "error", 2.5)
+        return
+    end
+    clone.Name = uniqueName(inst.Name)
+    pcall(function() clone.Parent = inst.Parent end)
+    if clone:IsA("GuiObject") then
+        pcall(function()
+            local p = clone.Position
+            clone.Position = UDim2.new(p.X.Scale, p.X.Offset + 14, p.Y.Scale, p.Y.Offset + 14)
+        end)
+    end
+    invalidateExplorer()
+    Editor.select(clone)
+end
+
+function Editor.setEditMode(enabled)
+    State.editMode = enabled and true or false
+    if UI.modeButton then
+        UI.modeButton.Text = State.editMode and "Mode: Edit" or "Mode: Test"
+    end
+    syncSelectionVisuals()
+    updateStatus()
+    notify(State.editMode and "Edit mode enabled" or "Test mode enabled — click your GUI to interact", "info")
+end
+
+function Editor.destroy()
+    for _, connection in ipairs(Connections) do
+        pcall(function() connection:Disconnect() end)
+    end
+    table.clear(Connections)
+    pcall(function() Overlay:Destroy() end)
+    print("[StudioGUI Creator] Editor closed. Your GUI instances remain in PlayerGui.")
+end
+
+-- //////////////////////////////////////////////////////////////////////////
+-- TOOLBAR WIRING
+-- //////////////////////////////////////////////////////////////////////////
+
+do
+    UI.makeToolbarButton("+ ScreenGui", function() Editor.spawnClass("ScreenGui") end, { width = 96, order = 1 })
+    UI.makeToolbarButton("Duplicate", function() Editor.duplicateSelected() end, { width = 80, order = 2 })
+    UI.makeToolbarButton("Delete", function() Editor.deleteSelected() end, { width = 64, order = 3 })
+    UI.makeToolbarButton("Export Luau", function() Editor.openExport() end, { width = 96, order = 4, accent = true })
+    UI.modeButton = UI.makeToolbarButton("Mode: Edit", function()
+        Editor.setEditMode(not State.editMode)
+    end, { width = 96, order = 5 })
+end
+
+-- //////////////////////////////////////////////////////////////////////////
+-- RUNTIME LOOPS
+-- //////////////////////////////////////////////////////////////////////////
+
+local renderErrorCount = 0
+trackConnection(RunService.RenderStepped:Connect(function()
+    local ok, err = pcall(function()
+        syncSelectionVisuals()
+        if explorerDirty then
+            explorerDirty = false
+            rebuildExplorer()
+        end
+    end)
+    if not ok then
+        renderErrorCount += 1
+        if renderErrorCount <= 3 then
+            warn("[StudioGUI Creator] render loop error: " .. tostring(err))
+        end
+    end
+end))
+
+-- Watchdog: re-parent the overlay if anything ever removes it.
+local watchdogTick = 0
+trackConnection(RunService.Heartbeat:Connect(function()
+    watchdogTick += 1
+    if watchdogTick % 300 ~= 0 then return end
+    if not Overlay.Parent then
+        pcall(function() Overlay.Parent = resolveProtectedParent() end)
+    end
+end))
+
+-- //////////////////////////////////////////////////////////////////////////
+-- BOOTSTRAP
+-- //////////////////////////////////////////////////////////////////////////
+
+UI.makeColumnHeader(UI.toolboxColumn, "INSERT")
+UI.makeColumnHeader(UI.explorerColumn, "EXPLORER")
+UI.makeColumnHeader(UI.propertiesColumn, "PROPERTIES")
+PropPanel.init()
+
+explorerScroll = UI.makeScrollList(UI.explorerColumn, 24)
+
+ensureProjectIntegrity()
+rebuildExplorer()
+
+local initialGuis = getProjectScreenGuis()
+if initialGuis[1] then
+    Editor.select(initialGuis[1])
+end
+updateStatus()
+
+notify("StudioGUI Creator loaded — " .. Executor.name, "success", 3.5)
+print("[StudioGUI Creator] Ready. Insert from the left panel, drag on screen to arrange, 'Export Luau' to serialize.")
+
+end -- main()
+
+local okInit, errInit = pcall(main)
+if not okInit then
+    warn("[StudioGUI Creator] Initialization error: " .. tostring(errInit))
+end
