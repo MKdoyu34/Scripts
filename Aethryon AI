@@ -1,0 +1,3759 @@
+--!strict
+
+local Players            = game:GetService("Players")
+local TweenService       = game:GetService("TweenService")
+local TextService        = game:GetService("TextService")
+local UserInputService   = game:GetService("UserInputService")
+local HttpService        = game:GetService("HttpService")
+local RunService         = game:GetService("RunService")
+local LocalPlayer: Player = Players.LocalPlayer
+
+local function resolveEnv(): {[string]: any}
+	local fe: any = rawget(_G :: any, "getfenv")
+	if typeof(fe) == "function" then
+		local ok, env = pcall(function() return (fe :: any)() end)
+		if ok and typeof(env) == "table" then return env :: any end
+	end
+	return _G :: any
+end
+local ENV: {[string]: any} = resolveEnv()
+
+local function execFn(...: string): any
+	for i = 1, select("#", ...) do
+		local name = (select(i, ...)) :: string
+		local f = rawget(ENV, name)
+		if f == nil then f = rawget(_G :: any, name) end
+		if typeof(f) == "function" then return f end
+	end
+	return nil
+end
+
+local function executorName(): string
+	local f = execFn("identifyexecutor", "getexecutorname")
+	if f then
+		local ok, name = pcall(f)
+		if ok and typeof(name) == "string" and name ~= "" then return name end
+	end
+	return "Unknown"
+end
+local EXECUTOR_NAME: string = executorName()
+
+local function copyToClipboard(text: string): (boolean, string)
+	local f = execFn("setclipboard", "toclipboard")
+	if f then
+		local ok = pcall(f, text)
+		if ok then return true, "Copied!" end
+		return false, "Clipboard function failed."
+	end
+	return false, "No clipboard API available. Select the code and press Ctrl/Cmd+C."
+end
+
+----------------------------------------------------------------------------------------------------
+-- 2. THEME
+----------------------------------------------------------------------------------------------------
+local T = {
+	bg          = Color3.fromHex("111118"),
+	surface     = Color3.fromHex("191923"),
+	sidebar     = Color3.fromHex("15151E"),
+	secondary   = Color3.fromHex("20202C"),
+	input       = Color3.fromHex("222230"),
+	hover       = Color3.fromHex("26263A"),
+	accent      = Color3.fromHex("A78BFA"),
+	accentHover = Color3.fromHex("C4B5FD"),
+	text        = Color3.fromHex("F4F1FA"),
+	textSub     = Color3.fromHex("A5A1B5"),
+	textMuted   = Color3.fromHex("777487"),
+	border      = Color3.fromHex("343344"),
+	warn        = Color3.fromHex("F0B66A"),
+	code        = Color3.fromHex("141420"),
+	success     = Color3.fromHex("7BD8A0"),
+	error       = Color3.fromHex("F0717A"),
+}
+local FONT      = Enum.Font.Gotham
+local FONT_MED  = Enum.Font.GothamMedium
+local FONT_BOLD = Enum.Font.GothamBold
+local FONT_CODE = Enum.Font.Code
+
+-- Exact Lucide icon asset IDs (section 4 of the spec).
+local ICONS = {
+	collapse = "rbxassetid://126579818823552", -- panel-left-close
+	expand   = "rbxassetid://111075816195767", -- panel-left-open
+	newChat  = "rbxassetid://120239476110475", -- square-pen
+	search   = "rbxassetid://121018724060431", -- search
+	settings = "rbxassetid://116544501716299", -- cog
+	send     = "rbxassetid://127751956873796", -- send
+	close    = "rbxassetid://110786993356448", -- x
+	chat     = "rbxassetid://83881670383280",  -- message-square
+}
+
+----------------------------------------------------------------------------------------------------
+-- 3. SMALL UI HELPERS
+----------------------------------------------------------------------------------------------------
+local ANIM = { enabled = true }
+
+local function new(className: string, props: {[string]: any}?, children: {Instance}?): any
+	local inst: any = Instance.new(className)
+	if props then
+		for k, v in pairs(props) do
+			if k ~= "Parent" then inst[k] = v end
+		end
+	end
+	if children then
+		for _, c in ipairs(children) do c.Parent = inst end
+	end
+	if props and props.Parent then inst.Parent = props.Parent end
+	return inst
+end
+
+local function corner(parent: Instance, r: number?): any
+	local c: any = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, r or 8)
+	c.Parent = parent
+	return c
+end
+
+local function stroke(parent: Instance, color: Color3?, trans: number?, thick: number?): any
+	local s: any = Instance.new("UIStroke")
+	s.Color = color or T.border
+	s.Transparency = trans or 0
+	s.Thickness = thick or 1
+	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	s.Parent = parent
+	return s
+end
+
+local function pad(parent: Instance, l: number?, t: number?, r: number?, b: number?): any
+	local p: any = Instance.new("UIPadding")
+	p.PaddingLeft = UDim.new(0, l or 0)
+	p.PaddingTop = UDim.new(0, t or 0)
+	p.PaddingRight = UDim.new(0, r or l or 0)
+	p.PaddingBottom = UDim.new(0, b or t or 0)
+	p.Parent = parent
+	return p
+end
+
+local function vlist(parent: Instance, gap: number?, align: any?, halign: any?): any
+	local l: any = Instance.new("UIListLayout")
+	l.FillDirection = Enum.FillDirection.Vertical
+	l.SortOrder = Enum.SortOrder.LayoutOrder
+	l.Padding = UDim.new(0, gap or 8)
+	l.VerticalAlignment = align or Enum.VerticalAlignment.Top
+	l.HorizontalAlignment = halign or Enum.HorizontalAlignment.Left
+	l.Parent = parent
+	return l
+end
+
+local function hlist(parent: Instance, gap: number?, halign: any?, valign: any?): any
+	local l: any = Instance.new("UIListLayout")
+	l.FillDirection = Enum.FillDirection.Horizontal
+	l.SortOrder = Enum.SortOrder.LayoutOrder
+	l.Padding = UDim.new(0, gap or 8)
+	l.HorizontalAlignment = halign or Enum.HorizontalAlignment.Left
+	l.VerticalAlignment = valign or Enum.VerticalAlignment.Center
+	l.Parent = parent
+	return l
+end
+
+local function tw(inst: any, dur: number, props: {[string]: any}, style: any?, dir: any?): any
+	local info = TweenInfo.new(
+		ANIM.enabled and dur or 0.001,
+		style or Enum.EasingStyle.Quint,
+		dir or Enum.EasingDirection.Out
+	)
+	local t = TweenService:Create(inst, info, props)
+	t:Play()
+	return t
+end
+
+-- Global ZIndex layering (ScreenGui uses ZIndexBehavior = Global).
+local Z = {
+	shadow = 0, window = 1, side = 10, conv = 10, msg = 20, fade = 60,
+	composer = 70, toggle = 150, backdrop = 200, modal = 210, confirm = 260,
+	popup = 500, notif = 900,
+}
+-- Assigns increasing ZIndex by depth so children always render above their ancestors.
+local function zindex(root: any, base: number)
+	local function walk(inst: Instance, depth: number)
+		for _, c in ipairs(inst:GetChildren()) do
+			if c:IsA("GuiObject") then
+				(c :: any).ZIndex = base + depth
+			elseif c:IsA("UIStroke") or c:IsA("UICorner") or c:IsA("UIGradient") then
+				-- no ZIndex on these; nothing to do
+			end
+			walk(c, math.min(depth + 1, 40))
+		end
+	end
+	if root:IsA("GuiObject") then root.ZIndex = base end
+	walk(root, 1)
+end
+
+local function iconLabel(id: string, size: number, color: Color3?, parent: Instance?): any
+	return new("ImageLabel", {
+		Name = "Icon",
+		Size = UDim2.new(0, size, 0, size),
+		BackgroundTransparency = 1,
+		Image = id,
+		ImageColor3 = color or T.textSub,
+		ScaleType = Enum.ScaleType.Fit,
+		Parent = parent,
+	})
+end
+
+-- Connection bookkeeping: everything is disconnected when its UI is destroyed/replaced.
+local function maid(): any
+	local m: any = { _conns = {} }
+	function m.add(conn: RBXScriptConnection): RBXScriptConnection
+		table.insert(m._conns, conn)
+		return conn
+	end
+	function m.clean()
+		for _, c in ipairs(m._conns) do pcall(function() c:Disconnect() end) end
+		table.clear(m._conns)
+	end
+	return m
+end
+
+----------------------------------------------------------------------------------------------------
+-- 4. STATE / CONFIGURATION
+----------------------------------------------------------------------------------------------------
+local function defaultProviders(): any
+	return {
+		openai = {
+			id = "openai", name = "OpenAI", mark = "AI",
+			baseUrl = "https://api.openai.com/v1",       -- documented default endpoint
+			apiKey = "", model = "", models = {}, thinking = "Low",
+		},
+		gemini = {
+			id = "gemini", name = "Google Gemini", mark = "G",
+			baseUrl = "https://generativelanguage.googleapis.com/v1beta", -- documented default endpoint
+			apiKey = "", model = "", models = {}, thinking = "Off",
+		},
+		claude = {
+			id = "claude", name = "Anthropic Claude", mark = "C",
+			baseUrl = "https://api.anthropic.com/v1",    -- documented default endpoint
+			apiKey = "", model = "", models = {}, thinking = "Off",
+		},
+	}
+end
+
+local function defaults(): any
+	return {
+		version = 1,
+		displayName = "",
+		systemPrompt = "",
+		activeProvider = "openai",
+		maxTokens = 1024,
+		temperature = 0.7,
+		providers = defaultProviders(),
+		ui = { animate = true, sidebarCollapsed = false },
+		conversations = {},
+		activeId = nil :: any,
+	}
+end
+
+local Config: any = defaults()
+
+----------------------------------------------------------------------------------------------------
+-- 5. PERSISTENCE (honest: standard Roblox client persistence does not exist)
+----------------------------------------------------------------------------------------------------
+local Store: any = { backend = "session", note = "" }
+local STORE_KEY = "aethryon_config_v1"
+
+local function detectStore()
+	-- (1) LocalStorageService: exists as a service, but its members are RobloxScriptSecurity-only.
+	--     We attempt it safely; if it is not callable we fall through.
+	local okSvc, svc = pcall(function() return game:GetService("LocalStorageService") end)
+	if okSvc and svc and typeof((svc :: any).SetItem) == "function" then
+		local okW = pcall(function() (svc :: any):SetItem("aethryon_probe", "1") end)
+		local okR = pcall(function() return (svc :: any):GetItem("aethryon_probe") end)
+		if okW and okR then
+			Store.backend = "localStorage"
+			Store.note = "Saved with LocalStorageService (this device)."
+			return
+		end
+	end
+	-- (2) Executor file API, only if it genuinely exists (configuration only — never API keys).
+	local wf, rf = execFn("writefile"), execFn("readfile")
+	if wf and rf then
+		Store.backend = "file"
+		Store.note = "Saved with an executor file API (this device). API keys are never stored."
+		return
+	end
+	-- (3) Session-only fallback.
+	Store.backend = "session"
+	Store.note = "No supported local storage available — settings last for this session only."
+end
+
+local function trimSlash(s: string): string
+	return (s:gsub("/+$", ""))
+end
+
+local function serializeConfig(): string
+	local payload: any = {
+		version = 1,
+		displayName = Config.displayName,
+		systemPrompt = Config.systemPrompt,
+		activeProvider = Config.activeProvider,
+		maxTokens = Config.maxTokens,
+		temperature = Config.temperature,
+		ui = Config.ui,
+		providers = {},
+		conversations = Config.conversations,
+		activeId = Config.activeId,
+	}
+	for id, p in pairs(Config.providers) do
+		payload.providers[id] = {
+			id = id, baseUrl = p.baseUrl, model = p.model,
+			models = p.models, thinking = p.thinking,
+			-- apiKey intentionally omitted: secrets are never persisted.
+		}
+	end
+	local ok, json = pcall(function() return HttpService:JSONEncode(payload) end)
+	return ok and json or ""
+end
+
+local saveQueued = false
+local function saveConfig()
+	if Store.backend == "session" then return false end
+	if saveQueued then return true end
+	saveQueued = true
+	task.delay(1.0, function()
+		saveQueued = false
+		local json = serializeConfig()
+		if json == "" then return end
+		if Store.backend == "localStorage" then
+			pcall(function()
+				local svc: any = game:GetService("LocalStorageService")
+				svc:SetItem(STORE_KEY, json)
+			end)
+		elseif Store.backend == "file" then
+			local mk, isf = execFn("makefolder"), execFn("isfolder")
+			pcall(function()
+				if mk and isf and not isf("aethryon") then mk("aethryon") end
+			end)
+			local wf = execFn("writefile")
+			if wf then pcall(wf, "aethryon/config.json", json) end
+		end
+	end)
+	return true
+end
+
+local function loadConfig(): boolean
+	local json: string? = nil
+	if Store.backend == "localStorage" then
+		local ok, val = pcall(function()
+			return (game:GetService("LocalStorageService") :: any):GetItem(STORE_KEY)
+		end)
+		if ok and typeof(val) == "string" and val ~= "" then json = val end
+	elseif Store.backend == "file" then
+		local isf = execFn("isfile")
+		local okExists = isf and (select(2, pcall(isf, "aethryon/config.json")) == true)
+		if okExists then
+			local rf = execFn("readfile")
+			if rf then
+				local ok, val = pcall(rf, "aethryon/config.json")
+				if ok and typeof(val) == "string" then json = val end
+			end
+		end
+	end
+	if not json then return false end
+	local ok, data = pcall(function() return HttpService:JSONDecode(json :: string) end)
+	if not ok or typeof(data) ~= "table" then return false end
+	local d: any = data
+	local fresh = defaults()
+	Config.displayName = typeof(d.displayName) == "string" and d.displayName or ""
+	Config.systemPrompt = typeof(d.systemPrompt) == "string" and d.systemPrompt or ""
+	Config.activeProvider = fresh.providers[d.activeProvider] and d.activeProvider or "openai"
+	Config.maxTokens = typeof(d.maxTokens) == "number" and math.clamp(math.floor(d.maxTokens), 1, 1000000) or 1024
+	Config.temperature = typeof(d.temperature) == "number" and math.clamp(d.temperature, 0, 2) or 0.7
+	if typeof(d.ui) == "table" then
+		Config.ui.animate = d.ui.animate ~= false
+		Config.ui.sidebarCollapsed = d.ui.sidebarCollapsed == true
+	end
+	if typeof(d.providers) == "table" then
+		for id, saved in pairs(d.providers) do
+			if fresh.providers[id] and typeof(saved) == "table" then
+				local p = fresh.providers[id]
+				if typeof(saved.baseUrl) == "string" then p.baseUrl = saved.baseUrl end
+				if typeof(saved.model) == "string" then p.model = saved.model end
+				if typeof(saved.thinking) == "string" then p.thinking = saved.thinking end
+				if typeof(saved.models) == "table" then
+					p.models = {}
+					for _, m in ipairs(saved.models) do
+						if typeof(m) == "table" and typeof(m.id) == "string" then
+							table.insert(p.models, {
+								id = m.id,
+								status = typeof(m.status) == "string" and m.status or "unknown",
+								reason = typeof(m.reason) == "string" and m.reason or nil,
+							})
+						elseif typeof(m) == "string" then
+							table.insert(p.models, { id = m, status = "unknown", reason = nil })
+						end
+					end
+				end
+			end
+		end
+	end
+	if typeof(d.conversations) == "table" then
+		for _, c in ipairs(d.conversations) do
+			if typeof(c) == "table" and typeof(c.id) == "string" and typeof(c.messages) == "table" then
+				table.insert(Config.conversations, {
+					id = c.id,
+					title = typeof(c.title) == "string" and c.title or "New Chat",
+					messages = c.messages,
+					updatedAt = typeof(c.updatedAt) == "number" and c.updatedAt or os.time(),
+				})
+			end
+		end
+	end
+	Config.activeId = typeof(d.activeId) == "string" and d.activeId or nil
+	return true
+end
+
+----------------------------------------------------------------------------------------------------
+-- 6. PROVIDER LAYER (documented APIs only; nothing fabricated)
+----------------------------------------------------------------------------------------------------
+-- Documented OpenAI deprecations (source: OpenAI API "Deprecations" page). Used ONLY to annotate
+-- a model id that a real fetch actually returned. Never used to invent model ids.
+local KNOWN_DEPRECATED: {[string]: {[string]: string}} = {
+	openai = {
+		["text-davinci-003"] = "Deprecated — shut down 2024-01-04",
+		["text-davinci-002"] = "Deprecated — shut down 2024-01-04",
+		["gpt-3.5-turbo-0301"] = "Deprecated — 2023-06-13",
+		["gpt-3.5-turbo-0613"] = "Deprecated — shut down 2024-09-13",
+		["gpt-3.5-turbo-16k-0613"] = "Deprecated — shut down 2024-09-13",
+		["gpt-4-32k"] = "Deprecated — shut down 2025-06-06",
+		["gpt-4-32k-0613"] = "Deprecated — shut down 2025-06-06",
+		["gpt-4-32k-0314"] = "Deprecated — shut down 2025-06-06",
+		["gpt-4-vision-preview"] = "Deprecated — shut down 2024-12-06",
+		["gpt-4-1106-vision-preview"] = "Deprecated — shut down 2024-12-06",
+	},
+	gemini = {},
+	claude = {},
+}
+
+local function statusForModel(providerId: string, modelId: string, apiStatus: string?, apiReason: string?): (string, string?)
+	if apiStatus == "deprecated" then
+		return "deprecated", apiReason or "Deprecated by provider"
+	end
+	local known = KNOWN_DEPRECATED[providerId]
+	if known and known[modelId] then return "deprecated", known[modelId] end
+	return "unknown", nil
+end
+
+local function sanitize(msg: string): string
+	local out = tostring(msg)
+	for _, p in pairs(Config.providers) do
+		local key = p.apiKey
+		if typeof(key) == "string" and #key >= 8 then
+			out = out:gsub(key:gsub("([%p%c])", "%%%1"), "[redacted]")
+		end
+	end
+	out = out:gsub("\n", " ")
+	if #out > 220 then out = out:sub(1, 220) .. "…" end
+	return out
+end
+
+local function httpEnabled(): boolean
+	local ok, enabled = pcall(function() return HttpService.HttpEnabled end)
+	return ok and enabled ~= false
+end
+
+local function httpRequest(opts: any): (boolean, any, string)
+	if not httpEnabled() then
+		return false, nil, "HttpService is disabled for this place (HttpEnabled = false); requests cannot be sent."
+	end
+	local ok, res = pcall(function() return HttpService:RequestAsync(opts) end)
+	if not ok then return false, nil, tostring(res) end
+	if typeof(res) ~= "table" then return false, nil, "Malformed response." end
+	if res.Success == false then
+		return false, res, "HTTP " .. tostring(res.StatusCode) .. " " .. tostring(res.StatusMessage or "")
+	end
+	return true, res, ""
+end
+
+local function jsonEncode(tbl: any): (boolean, string)
+	local ok, s = pcall(function() return HttpService:JSONEncode(tbl) end)
+	return ok, ok and s or ""
+end
+local function jsonDecode(s: string): (boolean, any)
+	local ok, d = pcall(function() return HttpService:JSONDecode(s) end)
+	return ok and typeof(d) == "table", d
+end
+
+-- Thinking/reasoning support, per provider documentation.
+-- Default is always the LOWEST supported level where a documented minimum exists.
+local THINKING_SPEC: {[string]: any} = {
+	openai = function(model: string): any
+		local levels = {
+			{ label = "Low",    value = "low" },
+			{ label = "Medium", value = "medium" },
+			{ label = "High",   value = "high" },
+		}
+		if model == "" then
+			return { supported = false, param = "reasoning_effort", levels = levels, defaultIndex = 1,
+				note = "Select a model first." }
+		end
+		if model:match("^gpt%-5") or model:match("^o%d") then
+			return { supported = true, param = "reasoning_effort", levels = levels, defaultIndex = 1,
+				note = "OpenAI reasoning models: reasoning_effort (low/medium/high; newer models may also accept none/minimal/xhigh). Temperature is not sent for reasoning models." }
+		end
+		return { supported = false, param = "reasoning_effort", levels = levels, defaultIndex = 1,
+			note = "Unverified for this model — Aethryon will not send a reasoning parameter unless the model is a documented reasoning model." }
+	end,
+	gemini = function(model: string): any
+		if model == "" then
+			return { supported = false, param = "thinkingConfig", levels = { { label = "Low", value = "low" } }, defaultIndex = 1,
+				note = "Select a model first." }
+		end
+		if model:match("^gemini%-[3-9]") then
+			return { supported = true, param = "thinkingConfig.thinkingLevel", levels = {
+					{ label = "Low", value = "low" }, { label = "Medium", value = "medium" }, { label = "High", value = "high" },
+				}, defaultIndex = 1,
+				note = "Gemini 3+: thinkingLevel. Thinking cannot be turned off on Gemini 3; lowest level is 'low'." }
+		end
+		if model:match("2%.5%-pro") then
+			return { supported = true, param = "thinkingConfig.thinkingBudget", levels = {
+					{ label = "Low (128)", value = 128 }, { label = "Medium (4096)", value = 4096 }, { label = "High (16384)", value = 16384 },
+				}, defaultIndex = 1,
+				note = "Gemini 2.5 Pro: thinkingBudget 128–32768. Thinking cannot be disabled." }
+		end
+		if model:match("2%.5%-flash%-lite") then
+			return { supported = true, param = "thinkingConfig.thinkingBudget", levels = {
+					{ label = "Off (0)", value = 0 }, { label = "Low (512)", value = 512 }, { label = "Medium (4096)", value = 4096 }, { label = "High (16384)", value = 16384 },
+				}, defaultIndex = 1,
+				note = "Gemini 2.5 Flash-Lite: thinkingBudget 512–24576; 0 disables thinking." }
+		end
+		if model:match("2%.5%-flash") then
+			return { supported = true, param = "thinkingConfig.thinkingBudget", levels = {
+					{ label = "Off (0)", value = 0 }, { label = "Low (1024)", value = 1024 }, { label = "Medium (8192)", value = 8192 }, { label = "High (24576)", value = 24576 },
+				}, defaultIndex = 1,
+				note = "Gemini 2.5 Flash: thinkingBudget 0–24576; 0 disables thinking." }
+		end
+		return { supported = false, param = "thinkingConfig", levels = {
+				{ label = "Off", value = 0 }, { label = "Low (1024)", value = 1024 }, { label = "Medium (8192)", value = 8192 },
+			}, defaultIndex = 1,
+			note = "Unverified for this model — no thinking parameter is sent. (Use thinkingBudget for 2.5, thinkingLevel for 3+.)" }
+	end,
+	claude = function(model: string): any
+		local levels = {
+			{ label = "Off", value = nil },
+			{ label = "Low (1024)", value = 1024 },
+			{ label = "Medium (4096)", value = 4096 },
+			{ label = "High (10000)", value = 10000 },
+		}
+		if model == "" then
+			return { supported = false, param = "thinking.budget_tokens", levels = levels, defaultIndex = 1,
+				note = "Select a model first." }
+		end
+		if model:match("^claude") then
+			return { supported = true, param = "thinking.budget_tokens", levels = levels, defaultIndex = 1,
+				note = "Anthropic extended thinking: thinking.budget_tokens (minimum 1024). Temperature is omitted when thinking is enabled. Newer models may also expose an 'effort' parameter, which this UI does not send." }
+		end
+		return { supported = false, param = "thinking.budget_tokens", levels = levels, defaultIndex = 1,
+			note = "Unverified for this model — no thinking parameter is sent." }
+	end,
+}
+
+local function thinkingSpec(providerId: string): any
+	local p = Config.providers[providerId]
+	local fn = THINKING_SPEC[providerId]
+	if not p or not fn then
+		return { supported = false, param = "", levels = { { label = "Off", value = nil } }, defaultIndex = 1,
+			note = "This provider does not expose a documented thinking-level control." }
+	end
+	return fn(p.model or "")
+end
+
+-- Resolves the stored label against the current spec, clamping to the lowest level when invalid.
+local function resolveThinking(providerId: string): (any, any)
+	local spec = thinkingSpec(providerId)
+	local p = Config.providers[providerId]
+	local chosen: any = nil
+	for _, lvl in ipairs(spec.levels) do
+		if lvl.label == (p and p.thinking or nil) then chosen = lvl end
+	end
+	if not chosen then
+		chosen = spec.levels[spec.defaultIndex] or spec.levels[1]
+		if p then p.thinking = chosen.label end
+	end
+	return spec, chosen
+end
+
+----------------------------------------------------------------------------------------------------
+-- Provider implementations (documented endpoints/auth only)
+----------------------------------------------------------------------------------------------------
+local Providers: {[string]: any} = {}
+
+Providers.openai = {
+	label = "OpenAI",
+	listModels = function(p: any): (boolean, any, string)
+		local ok, res, err = httpRequest({
+			Url = trimSlash(p.baseUrl) .. "/models",
+			Method = "GET",
+			Headers = { ["Authorization"] = "Bearer " .. p.apiKey, ["Content-Type"] = "application/json" },
+		})
+		if not ok then return false, nil, err end
+		local dok, data = jsonDecode(res.Body or "")
+		if not dok then return false, nil, "Could not parse the response from the models endpoint." end
+		local out = {}
+		for _, m in ipairs((data :: any).data or {}) do
+			if typeof(m) == "table" and typeof(m.id) == "string" then
+				local st, why = statusForModel("openai", m.id)
+				table.insert(out, { id = m.id, status = st, reason = why })
+			end
+		end
+		return true, out, ""
+	end,
+	chat = function(p: any, messages: any, params: any): (boolean, string, string)
+		local isReasoning = (p.model or ""):match("^gpt%-5") ~= nil or (p.model or ""):match("^o%d") ~= nil
+		local body: any = { model = p.model, messages = messages }
+		if isReasoning then body.max_completion_tokens = params.maxTokens else body.max_tokens = params.maxTokens end
+		if not isReasoning then body.temperature = params.temperature end
+		if params.thinkingValue ~= nil and params.thinkingSupported then body.reasoning_effort = params.thinkingValue end
+		local okEnc, payload = jsonEncode(body)
+		if not okEnc then return false, "", "Could not encode the request body." end
+		local ok, res, err = httpRequest({
+			Url = trimSlash(p.baseUrl) .. "/chat/completions",
+			Method = "POST",
+			Headers = { ["Authorization"] = "Bearer " .. p.apiKey, ["Content-Type"] = "application/json" },
+			Body = payload,
+		})
+		if not ok then return false, "", err end
+		local dok, data = jsonDecode(res.Body or "")
+		if not dok then return false, "", "Could not parse the chat completion response." end
+		local choice = ((data :: any).choices or {})[1]
+		local content = choice and choice.message and choice.message.content or nil
+		if typeof(content) ~= "string" then return false, "", "The response contained no message content." end
+		return true, content, ""
+	end,
+}
+
+Providers.gemini = {
+	label = "Google Gemini",
+	listModels = function(p: any): (boolean, any, string)
+		-- Documented: GET {base}/models?key=API_KEY  -> { models: [ { name: "models/<id>", supportedGenerationMethods: [...] } ] }
+		local ok, res, err = httpRequest({
+			Url = trimSlash(p.baseUrl) .. "/models?key=" .. HttpService:UrlEncode(p.apiKey),
+			Method = "GET",
+		})
+		if not ok then return false, nil, err end
+		local dok, data = jsonDecode(res.Body or "")
+		if not dok then return false, nil, "Could not parse the response from the models endpoint." end
+		local out = {}
+		for _, m in ipairs((data :: any).models or {}) do
+			if typeof(m) == "table" and typeof(m.name) == "string" then
+				local supports = false
+				for _, gm in ipairs(m.supportedGenerationMethods or {}) do
+					if gm == "generateContent" then supports = true end
+				end
+				if supports then
+					local id = (m.name:gsub("^models/", ""))
+					local st, why = statusForModel("gemini", id)
+					table.insert(out, { id = id, status = st, reason = why })
+				end
+			end
+		end
+		return true, out, ""
+	end,
+	chat = function(p: any, messages: any, params: any): (boolean, string, string)
+		local contents = {}
+		for _, m in ipairs(messages) do
+			table.insert(contents, {
+				role = (m.role == "assistant") and "model" or "user",
+				parts = { { text = m.content } },
+			})
+		end
+		local gen: any = { maxOutputTokens = params.maxTokens, temperature = params.temperature }
+		if params.thinkingSupported and params.thinkingValue ~= nil then
+			if params.thinkingParam == "thinkingConfig.thinkingLevel" then
+				gen.thinkingConfig = { thinkingLevel = params.thinkingValue }
+			else
+				gen.thinkingConfig = { thinkingBudget = params.thinkingValue }
+			end
+		end
+		local body: any = { contents = contents, generationConfig = gen }
+		if params.systemPrompt and params.systemPrompt ~= "" then
+			body.systemInstruction = { parts = { { text = params.systemPrompt } } }
+		end
+		local okEnc, payload = jsonEncode(body)
+		if not okEnc then return false, "", "Could not encode the request body." end
+		local ok, res, err = httpRequest({
+			Url = trimSlash(p.baseUrl) .. "/models/" .. p.model .. ":generateContent?key=" .. HttpService:UrlEncode(p.apiKey),
+			Method = "POST",
+			Headers = { ["Content-Type"] = "application/json" },
+			Body = payload,
+		})
+		if not ok then return false, "", err end
+		local dok, data = jsonDecode(res.Body or "")
+		if not dok then return false, "", "Could not parse the generateContent response." end
+		local cand = ((data :: any).candidates or {})[1]
+		local parts = cand and cand.content and cand.content.parts or nil
+		if typeof(parts) ~= "table" then return false, "", "The response contained no content parts." end
+		local buf = {}
+		for _, pt in ipairs(parts) do
+			if typeof(pt) == "table" and typeof(pt.text) == "string" then table.insert(buf, pt.text) end
+		end
+		if #buf == 0 then return false, "", "The response contained no text." end
+		return true, table.concat(buf, "\n"), ""
+	end,
+}
+
+Providers.claude = {
+	label = "Anthropic Claude",
+	listModels = function(p: any): (boolean, any, string)
+		-- Documented: GET {base}/models with x-api-key + anthropic-version headers.
+		local ok, res, err = httpRequest({
+			Url = trimSlash(p.baseUrl) .. "/models",
+			Method = "GET",
+			Headers = { ["x-api-key"] = p.apiKey, ["anthropic-version"] = "2023-06-01", ["Content-Type"] = "application/json" },
+		})
+		if not ok then return false, nil, err end
+		local dok, data = jsonDecode(res.Body or "")
+		if not dok then return false, nil, "Could not parse the response from the models endpoint." end
+		local out = {}
+		for _, m in ipairs((data :: any).data or {}) do
+			if typeof(m) == "table" and typeof(m.id) == "string" then
+				local apiStatus, apiReason = nil, nil
+				if m.lifecycle == "deprecated" or (typeof(m.deprecated_at) == "string" and m.deprecated_at ~= "") then
+					apiStatus, apiReason = "deprecated", "Deprecated by Anthropic (models API)"
+				end
+				local st, why = statusForModel("claude", m.id, apiStatus, apiReason)
+				table.insert(out, { id = m.id, status = st, reason = why })
+			end
+		end
+		return true, out, ""
+	end,
+	chat = function(p: any, messages: any, params: any): (boolean, string, string)
+		local body: any = { model = p.model, max_tokens = params.maxTokens, messages = messages }
+		if params.systemPrompt and params.systemPrompt ~= "" then body.system = params.systemPrompt end
+		local thinkingOn = params.thinkingSupported and params.thinkingValue ~= nil
+		if thinkingOn then
+			body.thinking = { type = "enabled", budget_tokens = params.thinkingValue }
+			-- Anthropic: temperature must be omitted (1) when extended thinking is enabled.
+		else
+			body.temperature = math.clamp(params.temperature, 0, 1)
+		end
+		local okEnc, payload = jsonEncode(body)
+		if not okEnc then return false, "", "Could not encode the request body." end
+		local ok, res, err = httpRequest({
+			Url = trimSlash(p.baseUrl) .. "/messages",
+			Method = "POST",
+			Headers = { ["x-api-key"] = p.apiKey, ["anthropic-version"] = "2023-06-01", ["Content-Type"] = "application/json" },
+			Body = payload,
+		})
+		if not ok then return false, "", err end
+		local dok, data = jsonDecode(res.Body or "")
+		if not dok then return false, "", "Could not parse the messages response." end
+		local buf = {}
+		for _, blk in ipairs((data :: any).content or {}) do
+			if typeof(blk) == "table" and blk.type == "text" and typeof(blk.text) == "string" then
+				table.insert(buf, blk.text)
+			end
+		end
+		if #buf == 0 then return false, "", "The response contained no text content." end
+		return true, table.concat(buf, "\n"), ""
+	end,
+}
+
+local function providerOrder(): {string}
+	return { "openai", "gemini", "claude" }
+end
+
+----------------------------------------------------------------------------------------------------
+-- 7. SYNTAX HIGHLIGHTING
+----------------------------------------------------------------------------------------------------
+local HL = {
+	keyword  = "#C792EA",
+	str      = "#C3E88D",
+	number   = "#F78C6C",
+	comment  = "#6E6E88",
+	operator = "#89DDFF",
+	func     = "#82AAFF",
+	api      = "#FFCB6C",
+	punct    = "#A5A1B5",
+}
+
+local function esc(s: string): string
+	s = s:gsub("&", "&amp;")
+	s = s:gsub("<", "&lt;")
+	s = s:gsub(">", "&gt;")
+	s = s:gsub('"', "&quot;")
+	s = s:gsub("'", "&apos;")
+	return s
+end
+
+local function setOf(list: {string}): {[string]: boolean}
+	local t: {[string]: boolean} = {}
+	for _, v in ipairs(list) do t[v] = true end
+	return t
+end
+
+local LUAU_KEYWORDS = setOf({
+	"and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in",
+	"local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while", "continue",
+	"export", "type",
+})
+local LUAU_BUILTINS = setOf({
+	"print", "warn", "error", "pcall", "xpcall", "select", "type", "typeof", "pairs", "ipairs", "next",
+	"tostring", "tonumber", "setmetatable", "getmetatable", "rawget", "rawset", "rawequal", "rawlen",
+	"require", "assert", "collectgarbage", "newproxy", "unpack", "math", "string", "table", "os",
+	"coroutine", "bit32", "utf8", "debug", "buffer", "task", "vector", "Instance", "Enum", "Random",
+	"DateTime", "Region3", "Rect", "Ray", "RaycastParams", "TweenInfo", "UDim", "UDim2", "Vector2",
+	"Vector3", "CFrame", "Color3", "BrickColor", "NumberRange", "NumberSequence", "ColorSequence",
+	"PhysicalProperties", "Axes", "Faces", "NumberSequenceKeypoint", "ColorSequenceKeypoint",
+	"CatalogSearchParams", "FloatCurveKey", "RotationCurveKey", "OverlapParams", "PathWaypoint",
+})
+local ROBLOX_API = setOf({
+	"game", "workspace", "script", "plugin", "Players", "Workspace", "Lighting", "ReplicatedFirst",
+	"ReplicatedStorage", "ServerScriptService", "ServerStorage", "StarterGui", "StarterPack",
+	"StarterPlayer", "Teams", "SoundService", "TweenService", "TextService", "UserInputService",
+	"HttpService", "RunService", "CollectionService", "ContentProvider", "ContextActionService",
+	"DataStoreService", "Debris", "GuiService", "HapticService", "InsertService", "KeyframeSequenceProvider",
+	"LocalizationService", "LogService", "MarketplaceService", "MaterialService", "PathfindingService",
+	"PhysicsService", "ProximityPromptService", "Selection", "Stats", "TextChatService",
+	"TeleportService", "TimerService", "VoiceChatService", "MemoryStoreService", "PolicyService",
+	"BadgeService", "AssetService", "AvatarEditorService", "MessagingService", "SocialService",
+	"GroupService", "PointsService", "GamePassService", "AnalyticsService", "VRService",
+})
+
+local PY_KEYWORDS = setOf({
+	"False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
+	"def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in",
+	"is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield",
+})
+local PY_BUILTINS = setOf({
+	"print", "len", "range", "enumerate", "zip", "map", "filter", "list", "dict", "set", "tuple", "str",
+	"int", "float", "bool", "abs", "min", "max", "sum", "open", "super", "self", "type", "isinstance",
+})
+local JS_KEYWORDS = setOf({
+	"await", "async", "break", "case", "catch", "class", "const", "continue", "debugger", "default",
+	"delete", "do", "else", "enum", "export", "extends", "false", "finally", "for", "from", "function",
+	"get", "if", "implements", "import", "in", "instanceof", "interface", "let", "new", "null", "of",
+	"package", "private", "protected", "public", "return", "set", "static", "super", "switch", "this",
+	"throw", "true", "try", "type", "typeof", "var", "void", "while", "yield",
+})
+local JS_BUILTINS = setOf({
+	"console", "window", "document", "Math", "JSON", "Object", "Array", "String", "Number", "Boolean",
+	"Promise", "Map", "Set", "Symbol", "Error", "require", "module", "exports", "globalThis",
+})
+local SQL_KEYWORDS = setOf({
+	"SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE", "TABLE",
+	"ALTER", "DROP", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "ON", "GROUP", "ORDER", "BY", "HAVING",
+	"LIMIT", "OFFSET", "AS", "AND", "OR", "NOT", "NULL", "IS", "IN", "LIKE", "DISTINCT", "INDEX", "VIEW",
+})
+local JSON_KEYWORDS = setOf({ "true", "false", "null" })
+local BASH_KEYWORDS = setOf({
+	"if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case", "esac", "function",
+	"return", "in", "export", "local", "echo", "cd", "set", "unset", "trap", "exit", "source",
+})
+local CSS_KEYWORDS = setOf({ "important", "inherit", "initial", "unset", "var", "calc", "url" })
+local HTML_KEYWORDS = setOf({ "DOCTYPE", "html", "head", "body", "div", "span", "script", "style", "link", "meta" })
+
+local LANGS: {[string]: any} = {}
+local function regLang(aliases: {string}, def: any)
+	for _, a in ipairs(aliases) do LANGS[a] = def end
+end
+
+regLang({ "lua", "luau", "luauu" }, {
+	name = "Luau", lineComment = "--", longBrackets = true, quotes = { '"', "'" }, escapes = true,
+	opChars = "+-*/%%#=~<>^&|;:,.?()[]{}!\\", keywords = LUAU_KEYWORDS, builtins = LUAU_BUILTINS, api = ROBLOX_API,
+})
+regLang({ "python", "py" }, {
+	name = "Python", lineComment = "#", tripleQuotes = { '"""', "'''" }, quotes = { '"', "'" }, escapes = true,
+	opChars = "+-*/%%=~<>^&|;:,.?()[]{}!\\", keywords = PY_KEYWORDS, builtins = PY_BUILTINS, api = {},
+})
+regLang({ "javascript", "js", "typescript", "ts", "jsx", "tsx", "jsonc" }, {
+	name = "JavaScript", lineComment = "//", blockOpen = "/*", blockClose = "*/",
+	quotes = { '"', "'", "`" }, escapes = true,
+	opChars = "+-*/%%=~<>^&|;:,.?()[]{}!\\", keywords = JS_KEYWORDS, builtins = JS_BUILTINS, api = {},
+})
+regLang({ "json" }, {
+	name = "JSON", lineComment = nil, quotes = { '"' }, escapes = true,
+	opChars = ":,[]{}", keywords = JSON_KEYWORDS, builtins = {}, api = {},
+})
+regLang({ "sql" }, {
+	name = "SQL", lineComment = "--", blockOpen = "/*", blockClose = "*/", quotes = { "'", '"' }, escapes = false,
+	opChars = "+-*/%%=<>,;()", keywords = SQL_KEYWORDS, builtins = {}, api = {}, caseInsensitiveKeywords = true,
+})
+regLang({ "bash", "sh", "shell", "zsh" }, {
+	name = "Bash", lineComment = "#", quotes = { '"', "'" }, escapes = true,
+	opChars = "=<>|&;()$", keywords = BASH_KEYWORDS, builtins = {}, api = {},
+})
+regLang({ "css" }, {
+	name = "CSS", lineComment = nil, blockOpen = "/*", blockClose = "*/", quotes = { '"', "'" }, escapes = true,
+	opChars = ":;{},()", keywords = CSS_KEYWORDS, builtins = {}, api = {},
+})
+regLang({ "html", "xml", "svg" }, {
+	name = "HTML", lineComment = nil, blockOpen = "<!--", blockClose = "-->", quotes = { '"', "'" }, escapes = false,
+	opChars = "=<>/:;", keywords = HTML_KEYWORDS, builtins = {}, api = {},
+})
+
+local function isLetter(c: string): boolean
+	return c:match("[%a_]") ~= nil
+end
+local function isDigit(c: string): boolean
+	return c:match("%d") ~= nil
+end
+
+-- Matches Luau-style long brackets: "--[[", "--[==[", "[[", "[=["
+local function matchLongOpen(src: string, i: number, prefix: string): (number?, number?)
+	local p = i
+	if prefix ~= "" then
+		if src:sub(p, p + #prefix - 1) ~= prefix then return nil, nil end
+		p += #prefix
+	end
+	if src:sub(p, p) ~= "[" then return nil, nil end
+	local q, eqs = p + 1, 0
+	while src:sub(q, q) == "=" do
+		eqs += 1
+		q += 1
+	end
+	if src:sub(q, q) ~= "[" then return nil, nil end
+	return eqs, q + 1
+end
+
+local function tokenize(src: string, def: any): any
+	local tokens: any = {}
+	local i, n = 1, #src
+	local function push(kind: string, text: string)
+		if text ~= "" then tokens[#tokens + 1] = { kind = kind, text = text } end
+	end
+	while i <= n do
+		local c = src:sub(i, i)
+		local advanced = false
+
+		-- whitespace
+		if c:match("%s") then
+			local j = i
+			while j <= n and src:sub(j, j):match("%s") do j += 1 end
+			push("plain", src:sub(i, j - 1))
+			i = j
+			advanced = true
+
+		-- long bracket comment (Luau)
+		elseif def.longBrackets and def.lineComment and src:sub(i, i + #def.lineComment - 1) == def.lineComment then
+			local eqs, contentStart = matchLongOpen(src, i, def.lineComment)
+			if eqs then
+				local close = "]" .. string.rep("=", eqs :: number) .. "]"
+				local rel = src:find(close, contentStart :: number, true)
+				local stop = rel and ((rel :: number) + #close - 1) or n
+				push("comment", src:sub(i, stop))
+				i = stop + 1
+				advanced = true
+			end
+		end
+
+		if not advanced then
+			-- line comment
+			if def.lineComment and src:sub(i, i + #def.lineComment - 1) == def.lineComment then
+				local rel = src:find("\n", i, true)
+				local stop = rel and ((rel :: number) - 1) or n
+				push("comment", src:sub(i, stop))
+				i = stop + 1
+
+			-- block comment
+			elseif def.blockOpen and src:sub(i, i + #def.blockOpen - 1) == def.blockOpen then
+				local rel = src:find(def.blockClose, i + #def.blockOpen, true)
+				local stop = rel and ((rel :: number) + #def.blockClose - 1) or n
+				push("comment", src:sub(i, stop))
+				i = stop + 1
+
+			-- long bracket string (Luau)
+			elseif def.longBrackets and c == "[" then
+				local eqs, contentStart = matchLongOpen(src, i, "")
+				if eqs then
+					local close = "]" .. string.rep("=", eqs :: number) .. "]"
+					local rel = src:find(close, contentStart :: number, true)
+					local stop = rel and ((rel :: number) + #close - 1) or n
+					push("string", src:sub(i, stop))
+					i = stop + 1
+				else
+					push("operator", c)
+					i += 1
+				end
+
+			-- triple quoted string (Python)
+			elseif def.tripleQuotes then
+				local matched = false
+				for _, tq in ipairs(def.tripleQuotes) do
+					if src:sub(i, i + #tq - 1) == tq then
+						local rel = src:find(tq, i + #tq, true)
+						local stop = rel and ((rel :: number) + #tq - 1) or n
+						push("string", src:sub(i, stop))
+						i = stop + 1
+						matched = true
+						break
+					end
+				end
+				if not matched then
+					i = i + 0 -- fallthrough handled below
+				end
+				if not matched then
+					-- not a triple quote; continue to other checks
+				end
+			end
+		end
+
+		if i <= n and not advanced then
+			local handled = false
+			-- triple quote retry (kept separate to keep the branch readable)
+			if def.tripleQuotes and not handled then
+				for _, tq in ipairs(def.tripleQuotes) do
+					if src:sub(i, i + #tq - 1) == tq then
+						local rel = src:find(tq, i + #tq, true)
+						local stop = rel and ((rel :: number) + #tq - 1) or n
+						push("string", src:sub(i, stop))
+						i = stop + 1
+						handled = true
+						break
+					end
+				end
+			end
+			if not handled and def.lineComment and src:sub(i, i + #def.lineComment - 1) == def.lineComment then
+				local rel = src:find("\n", i, true)
+				local stop = rel and ((rel :: number) - 1) or n
+				push("comment", src:sub(i, stop))
+				i = stop + 1
+				handled = true
+			end
+			if not handled and def.blockOpen and src:sub(i, i + #def.blockOpen - 1) == def.blockOpen then
+				local rel = src:find(def.blockClose, i + #def.blockOpen, true)
+				local stop = rel and ((rel :: number) + #def.blockClose - 1) or n
+				push("comment", src:sub(i, stop))
+				i = stop + 1
+				handled = true
+			end
+			if not handled and def.longBrackets and src:sub(i, i) == "[" then
+				local eqs, contentStart = matchLongOpen(src, i, "")
+				if eqs then
+					local close = "]" .. string.rep("=", eqs :: number) .. "]"
+					local rel = src:find(close, contentStart :: number, true)
+					local stop = rel and ((rel :: number) + #close - 1) or n
+					push("string", src:sub(i, stop))
+					i = stop + 1
+					handled = true
+				end
+			end
+			if not handled then
+				local q = src:sub(i, i)
+				local isQuote = false
+				if def.quotes then
+					for _, qq in ipairs(def.quotes) do
+						if q == qq then isQuote = true end
+					end
+				end
+				if isQuote then
+					local j = i + 1
+					while j <= n do
+						local ch = src:sub(j, j)
+						if def.escapes and ch == "\\" then
+							j += 2
+						elseif ch == q then
+							j += 1
+							break
+						elseif ch == "\n" and q ~= "`" then
+							break
+						else
+							j += 1
+						end
+					end
+					push("string", src:sub(i, math.min(j - 1, n)))
+					i = j
+					handled = true
+				end
+			end
+			if not handled and (isDigit(c) or (c == "." and isDigit(src:sub(i + 1, i + 1) or ""))) then
+				local numpat = src:match("^0[xXbBoO][%da-fA-F_.]+", i)
+					or src:match("^%d+%.?%d*[eE][%+%-]?%d+", i)
+					or src:match("^%d+[%._]?[%d_]*", i)
+					or src:match("^%.%d+", i)
+				if numpat then
+					push("number", numpat)
+					i += #numpat
+					handled = true
+				end
+			end
+			if not handled and isLetter(c) then
+				local j = i
+				while j <= n and (isLetter(src:sub(j, j)) or isDigit(src:sub(j, j))) do j += 1 end
+				local word = src:sub(i, j - 1)
+				local lookup = (def.caseInsensitiveKeywords and word:upper()) or word
+				if def.keywords[lookup] or def.keywords[word] then
+					push("keyword", word)
+				else
+					-- function-call detection
+					local k = j
+					while k <= n and src:sub(k, k):match("%s") do k += 1 end
+					local nc = src:sub(k, k)
+					if nc == "(" or nc == '"' or nc == "'" or nc == "{" or nc == "`" then
+						push("func", word)
+					elseif def.api[word] then
+						push("api", word)
+					elseif def.builtins[word] then
+						push("builtin", word)
+					else
+						push("plain", word)
+					end
+				end
+				i = j
+				handled = true
+			end
+			if not handled then
+				local opset = def.opChars or "+-*/%%=~<>^&|;:,.?()[]{}!#"
+				local j = i
+				while j <= n and opset:find(src:sub(j, j), 1, true) do j += 1 end
+				if j == i then j = i + 1 end
+				push("operator", src:sub(i, j - 1))
+				i = j
+			end
+		end
+	end
+	return tokens
+end
+
+local KIND_COLOR: {[string]: string?} = {
+	keyword = HL.keyword, string = HL.str, comment = HL.comment, number = HL.number,
+	operator = HL.operator, func = HL.func, api = HL.api, builtin = HL.api, plain = nil,
+}
+
+local function highlight(src: string, langKey: string): string
+	local def = LANGS[langKey]
+	if not def then return esc(src) end
+	local tokens = tokenize(src, def)
+	local lines: {string} = {}
+	local cur = ""
+	local function emit(text: string, color: string?)
+		local startIdx = 1
+		while true do
+			local nl = text:find("\n", startIdx, true)
+			local chunk = text:sub(startIdx, nl and ((nl :: number) - 1) or nil)
+			if color then
+				cur ..= '<font color="' .. color .. '">' .. esc(chunk) .. "</font>"
+			else
+				cur ..= esc(chunk)
+			end
+			if not nl then break end
+			table.insert(lines, cur)
+			cur = ""
+			startIdx = (nl :: number) + 1
+		end
+	end
+	for _, tk in ipairs(tokens) do
+		emit(tk.text, KIND_COLOR[tk.kind])
+	end
+	table.insert(lines, cur)
+	return table.concat(lines, "\n")
+end
+
+----------------------------------------------------------------------------------------------------
+-- 8. MARKDOWN (fences + inline) AND LANGUAGE TITLES
+----------------------------------------------------------------------------------------------------
+local LANG_TITLE: {[string]: {title: string, key: string}} = {
+	[""]           = { title = "Luau",       key = "luau" },
+	["lua"]        = { title = "Luau",       key = "luau" },
+	["luau"]       = { title = "Luau",       key = "luau" },
+	["python"]     = { title = "Python",     key = "python" },
+	["py"]         = { title = "Python",     key = "python" },
+	["javascript"] = { title = "JavaScript", key = "javascript" },
+	["js"]         = { title = "JavaScript", key = "javascript" },
+	["typescript"] = { title = "TypeScript", key = "javascript" },
+	["ts"]         = { title = "TypeScript", key = "javascript" },
+	["json"]       = { title = "JSON",       key = "json" },
+	["html"]       = { title = "HTML",       key = "html" },
+	["css"]        = { title = "CSS",        key = "css" },
+	["sql"]        = { title = "SQL",        key = "sql" },
+	["bash"]       = { title = "Bash",       key = "bash" },
+	["sh"]         = { title = "Shell",      key = "bash" },
+	["shell"]      = { title = "Shell",      key = "bash" },
+	["xml"]        = { title = "XML",        key = "html" },
+	["plaintext"]  = { title = "Plaintext",  key = "plain" },
+	["text"]       = { title = "Plaintext",  key = "plain" },
+}
+
+local function langInfo(tag: string): (string, string)
+	local key = (tag or ""):lower()
+	local info = LANG_TITLE[key]
+	if info then return info.title, info.key end
+	if key == "" then return "Luau", "luau" end
+	return key:sub(1, 1):upper() .. key:sub(2), key
+end
+
+local function parseBlocks(text: string): any
+	local blocks: any = {}
+	local lines: {string} = {}
+	for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+		lines[#lines + 1] = line
+	end
+	local i, buf = 1, {}
+	local function flush()
+		if #buf > 0 then
+			local joined = table.concat(buf, "\n")
+			if joined:gsub("%s", "") ~= "" then
+				blocks[#blocks + 1] = { kind = "text", value = joined }
+			end
+			buf = {}
+		end
+	end
+	while i <= #lines do
+		local line = lines[i]
+		local lang = line:match("^%s*```%s*([%w_%+%.#%-]*)%s*$")
+		if lang then
+			flush()
+			local code: {string} = {}
+			i += 1
+			while i <= #lines and not lines[i]:match("^%s*```%s*$") do
+				code[#code + 1] = lines[i]
+				i += 1
+			end
+			i += 1
+			blocks[#blocks + 1] = { kind = "code", value = table.concat(code, "\n"), lang = lang or "" }
+		else
+			buf[#buf + 1] = line
+			i += 1
+		end
+	end
+	flush()
+	return blocks
+end
+
+local function mdInline(s: string): string
+	s = esc(s)
+	s = s:gsub("`([^`\n]+)`", '<font face="Code" color="#C4B5FD">%1</font>')
+	s = s:gsub("%*%*(.-)%*%*", "<b>%1</b>")
+	s = s:gsub("%*(.-)%*", "<i>%1</i>")
+	s = s:gsub("~~(.-)~~", "<s>%1</s>")
+	return s
+end
+
+----------------------------------------------------------------------------------------------------
+-- 9. ROOT GUI
+----------------------------------------------------------------------------------------------------
+local screenGui = new("ScreenGui", {
+	Name = "AethryonAI",
+	ResetOnSpawn = false,
+	IgnoreGuiInset = true,
+	ZIndexBehavior = Enum.ZIndexBehavior.Global,
+	DisplayOrder = 10,
+	Parent = LocalPlayer:WaitForChild("PlayerGui"),
+})
+
+-- Popup layer (dropdowns / model pickers) and notification layer live above everything.
+local popupLayer = new("Frame", {
+	Name = "PopupLayer", Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+	Active = false, ZIndex = Z.popup, Parent = screenGui,
+})
+local notifLayer = new("Frame", {
+	Name = "NotificationLayer",
+	Size = UDim2.new(0, 340, 0, 0),
+	AnchorPoint = Vector2.new(1, 1),
+	Position = UDim2.new(1, -28, 1, -28),
+	AutomaticSize = Enum.AutomaticSize.Y,
+	BackgroundTransparency = 1,
+	Active = false,
+	ZIndex = Z.notif,
+	Parent = screenGui,
+})
+vlist(notifLayer, 10, Enum.VerticalAlignment.Bottom)
+
+----------------------------------------------------------------------------------------------------
+-- 10. NOTIFICATIONS (bottom-right)
+----------------------------------------------------------------------------------------------------
+local notifications: any = {}
+local MAX_NOTIFS = 4
+
+local function notify(opts: any)
+	local kind = opts.kind or "info"
+	local accent = T.accent
+	if kind == "success" then accent = T.success
+	elseif kind == "warn" then accent = T.warn
+	elseif kind == "error" then accent = T.error end
+
+	local card = new("CanvasGroup", {
+		Name = "Notification",
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = T.surface,
+		GroupTransparency = 1,
+		ZIndex = Z.notif,
+		Parent = notifLayer,
+	})
+	corner(card, 10)
+	stroke(card, T.border, 0.3)
+	local bar = new("Frame", { Size = UDim2.new(0, 3, 1, 0), BackgroundColor3 = accent, BorderSizePixel = 0, ZIndex = Z.notif, Parent = card })
+	corner(bar, 2)
+	local body = new("Frame", {
+		Size = UDim2.new(1, -3, 0, 0), Position = UDim2.new(0, 3, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, ZIndex = Z.notif, Parent = card,
+	})
+	pad(body, 12, 10, 12, 10)
+	vlist(body, 4)
+	local title = new("TextLabel", {
+		Size = UDim2.new(1, opts.close and -20 or 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1, Font = FONT_BOLD, TextSize = 14, TextColor3 = T.text,
+		Text = opts.title or "", TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true,
+		RichText = true, ZIndex = Z.notif, Parent = body,
+	})
+	local desc = new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1, Font = FONT, TextSize = 12, TextColor3 = T.textSub,
+		Text = opts.desc or "", TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+		TextWrapped = true, RichText = true, LineHeight = 1.35, ZIndex = Z.notif, Parent = body,
+	})
+	if opts.close ~= false then
+		local x = new("ImageButton", {
+			Size = UDim2.new(0, 16, 0, 16), Position = UDim2.new(1, -6, 0, 6), AnchorPoint = Vector2.new(1, 0),
+			BackgroundTransparency = 1, Image = ICONS.close, ImageColor3 = T.textMuted,
+			ScaleType = Enum.ScaleType.Fit, AutoButtonColor = false, ZIndex = Z.notif + 2, Parent = card,
+		})
+		x.Activated:Connect(function() card:Destroy() end)
+	end
+
+	table.insert(notifications, card)
+	while #notifications > MAX_NOTIFS do
+		local oldest = table.remove(notifications, 1)
+		if oldest and oldest.Parent then
+			tw(oldest, 0.2, { GroupTransparency = 1 })
+			task.delay(0.2, function() if oldest.Parent then oldest:Destroy() end end)
+		end
+	end
+	tw(card, 0.25, { GroupTransparency = 0 })
+
+	local life = opts.duration or (kind == "error" and 7 or 5)
+	task.delay(life, function()
+		if not card.Parent then return end
+		tw(card, 0.35, { GroupTransparency = 1 })
+		task.delay(0.4, function()
+			if card.Parent then card:Destroy() end
+			for i, n in ipairs(notifications) do
+				if n == card then table.remove(notifications, i) break end
+			end
+		end)
+	end)
+	return card
+end
+
+----------------------------------------------------------------------------------------------------
+-- 11. MAIN WINDOW
+----------------------------------------------------------------------------------------------------
+local mainWindow = new("Frame", {
+	Name = "MainWindow",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.new(0.5, 0, 0.5, 0),
+	Size = UDim2.new(0, 1080, 0, 680),
+	BackgroundColor3 = T.surface,
+	BorderSizePixel = 0,
+	ClipsDescendants = true,
+	ZIndex = Z.window,
+	Parent = screenGui,
+})
+corner(mainWindow, 16)
+stroke(mainWindow, T.border, 0.5)
+local winConstraint = new("UISizeConstraint", {
+	MinSize = Vector2.new(420, 320),
+	MaxSize = Vector2.new(1180, 760),
+	Parent = mainWindow,
+})
+
+-- Soft shadow (decorative, non-interactive).
+local shadow = new("Frame", {
+	Name = "Shadow", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 6),
+	Size = UDim2.new(1, 46, 1, 46), BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.55,
+	BorderSizePixel = 0, ZIndex = Z.shadow, Active = false, Parent = screenGui,
+})
+corner(shadow, 24)
+
+----------------------------------------------------------------------------------------------------
+-- 12. SIDEBAR (rounded left corners, square right corners via patch layer)
+----------------------------------------------------------------------------------------------------
+local SIDEBAR_W_OPEN, SIDEBAR_W_SHUT = 236, 64
+local sidebarCollapsed = false
+
+local sidebar = new("Frame", {
+	Name = "Sidebar", Size = UDim2.new(0, SIDEBAR_W_OPEN, 1, 0),
+	BackgroundColor3 = T.sidebar, BorderSizePixel = 0,
+	ZIndex = Z.side + 1, Parent = mainWindow,
+})
+corner(sidebar, 16)
+-- Squares the right corners without touching MainWindow's rounded corners.
+local sidePatch = new("Frame", {
+	Name = "RightCornerPatch", Size = UDim2.new(0, 16, 1, 0),
+	AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0),
+	BackgroundColor3 = T.sidebar, BorderSizePixel = 0, ZIndex = Z.side, Parent = sidebar,
+})
+local sideDivider = new("Frame", {
+	Name = "Divider", Size = UDim2.new(0, 1, 1, 0), AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.new(1, 0, 0, 0), BackgroundColor3 = T.border, BackgroundTransparency = 0.35,
+	BorderSizePixel = 0, ZIndex = Z.side + 6, Parent = sidebar,
+})
+local sidePad = pad(sidebar, 8, 12, 16, 12) -- right padding clears the patch
+local sideLayout = vlist(sidebar, 8)
+
+local topControls = new("Frame", {
+	Name = "TopControls", Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+	BackgroundTransparency = 1, LayoutOrder = 1, ZIndex = Z.side + 2, Parent = sidebar,
+})
+vlist(topControls, 6)
+
+local searchBox = new("TextBox", {
+	Name = "SearchBox", Size = UDim2.new(1, 0, 0, 34), Visible = false,
+	BackgroundColor3 = T.input, Text = "", PlaceholderText = "Search chats…",
+	Font = FONT, TextSize = 13, TextColor3 = T.text, PlaceholderColor3 = T.textMuted,
+	ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left,
+	ZIndex = Z.side + 4, Parent = topControls,
+})
+corner(searchBox, 8)
+stroke(searchBox, T.border, 0.4)
+pad(searchBox, 10, 0, 10, 0)
+
+local historyLabel = new("TextLabel", {
+	Name = "HistoryLabel", Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1,
+	Text = "Conversations", Font = FONT_BOLD, TextSize = 12, TextColor3 = T.textMuted,
+	TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 2, ZIndex = Z.side + 2, Parent = sidebar,
+})
+
+local historyScroll = new("ScrollingFrame", {
+	Name = "History", Size = UDim2.new(1, 0, 1, -150), LayoutOrder = 3,
+	BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 4,
+	ScrollBarImageColor3 = T.border, ScrollBarImageTransparency = 0.4,
+	ScrollingDirection = Enum.ScrollingDirection.Y, AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	CanvasSize = UDim2.new(0, 0, 0, 0), ZIndex = Z.side + 2, Parent = sidebar,
+})
+vlist(historyScroll, 4)
+pad(historyScroll, 0, 4, 4, 4)
+
+local bottomControls = new("Frame", {
+	Name = "BottomControls", Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+	BackgroundTransparency = 1, LayoutOrder = 4, ZIndex = Z.side + 2, Parent = sidebar,
+})
+vlist(bottomControls, 6)
+
+----------------------------------------------------------------------------------------------------
+-- 13. CONVERSATION AREA
+----------------------------------------------------------------------------------------------------
+local conv = new("Frame", {
+	Name = "Conversation", Position = UDim2.new(0, SIDEBAR_W_OPEN, 0, 0),
+	Size = UDim2.new(1, -SIDEBAR_W_OPEN, 1, 0), BackgroundTransparency = 1,
+	BorderSizePixel = 0, ZIndex = Z.conv, Parent = mainWindow,
+})
+
+local header = new("Frame", {
+	Name = "Header", Size = UDim2.new(1, 0, 0, 58), BackgroundColor3 = T.surface,
+	BorderSizePixel = 0, ZIndex = Z.conv + 1, Parent = conv,
+})
+pad(header, 18, 0, 18, 0)
+local headerRule = new("Frame", {
+	Size = UDim2.new(1, -36, 0, 1), Position = UDim2.new(0, 18, 1, -1),
+	BackgroundColor3 = T.border, BackgroundTransparency = 0.5, BorderSizePixel = 0,
+	ZIndex = Z.conv + 2, Parent = header,
+})
+
+local providerButton = new("TextButton", {
+	Name = "ProviderSwitcher", Size = UDim2.new(0, 236, 0, 38),
+	AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0),
+	BackgroundColor3 = T.secondary, AutoButtonColor = false, Font = FONT_MED, TextSize = 13,
+	TextColor3 = T.text, Text = "OpenAI · no model", TextXAlignment = Enum.TextXAlignment.Left,
+	ZIndex = Z.conv + 3, Parent = header,
+})
+corner(providerButton, 10)
+stroke(providerButton, T.border, 0.35)
+pad(providerButton, 12, 0, 12, 0)
+local providerChevron = new("TextLabel", {
+	Size = UDim2.new(0, 10, 0, 10), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0),
+	BackgroundTransparency = 1, Text = "", Font = FONT_BOLD, TextSize = 11, TextColor3 = T.textMuted,
+	ZIndex = Z.conv + 4, Parent = providerButton,
+})
+
+local previewBadge = new("TextLabel", {
+	Name = "PreviewBadge", Size = UDim2.new(0, 132, 0, 24),
+	AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0),
+	BackgroundColor3 = T.secondary, Font = FONT_BOLD, TextSize = 11, TextColor3 = T.warn,
+	Text = "UI PREVIEW", ZIndex = Z.conv + 3, Parent = header,
+})
+corner(previewBadge, 12)
+
+-- Chat body: clips to rounded corners and hosts the fade overlays.
+local chatBody = new("Frame", {
+	Name = "ChatBody", Position = UDim2.new(0, 0, 0, 58), Size = UDim2.new(1, 0, 1, -58 - 70),
+	BackgroundColor3 = T.surface, BorderSizePixel = 0, ClipsDescendants = true,
+	ZIndex = Z.conv + 1, Parent = conv,
+})
+corner(chatBody, 14)
+
+local feed = new("ScrollingFrame", {
+	Name = "Feed", Size = UDim2.new(1, 0, 1, 0), Position = UDim2.new(0, 0, 0, 0),
+	BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 6,
+	ScrollBarImageColor3 = T.border, ScrollBarImageTransparency = 0.35,
+	ScrollingDirection = Enum.ScrollingDirection.Y, AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	CanvasSize = UDim2.new(0, 0, 0, 0), ElasticBehavior = Enum.ElasticBehavior.Never,
+	ZIndex = Z.msg, Parent = chatBody,
+})
+local feedList = vlist(feed, 14, Enum.VerticalAlignment.Top)
+pad(feed, 22, 18, 22, 18)
+
+-- Geometry-Dash-style fade boundaries: layered gradient overlays (non-interactive) PLUS
+-- per-message transparency modulation driven by scroll events.
+local fadeTop = new("Frame", {
+	Name = "FadeTop", Size = UDim2.new(1, 0, 0, 54), Position = UDim2.new(0, 0, 0, 0),
+	BackgroundColor3 = T.surface, BorderSizePixel = 0, Active = false,
+	ZIndex = Z.fade, Parent = chatBody,
+})
+local gradTop = new("UIGradient", { Rotation = 90, Transparency = NumberSequence.new({
+	NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(0.65, 0.55), NumberSequenceKeypoint.new(1, 1),
+}), Parent = fadeTop })
+local fadeBottom = new("Frame", {
+	Name = "FadeBottom", Size = UDim2.new(1, 0, 0, 54), AnchorPoint = Vector2.new(0, 1),
+	Position = UDim2.new(0, 0, 1, 0), BackgroundColor3 = T.surface, BorderSizePixel = 0,
+	Active = false, ZIndex = Z.fade, Parent = chatBody,
+})
+local gradBottom = new("UIGradient", { Rotation = 90, Transparency = NumberSequence.new({
+	NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.35, 0.55), NumberSequenceKeypoint.new(1, 0),
+}), Parent = fadeBottom })
+local fadeLeft = new("Frame", {
+	Name = "FadeLeft", Size = UDim2.new(0, 46, 1, -8), Position = UDim2.new(0, 0, 0, 4),
+	BackgroundColor3 = T.surface, BorderSizePixel = 0, Active = false, ZIndex = Z.fade, Parent = chatBody,
+})
+local gradLeft = new("UIGradient", { Rotation = 0, Transparency = NumberSequence.new({
+	NumberSequenceKeypoint.new(0, 0.55), NumberSequenceKeypoint.new(0.5, 0.9), NumberSequenceKeypoint.new(1, 1),
+}), Parent = fadeLeft })
+
+local emptyState = new("Frame", {
+	Name = "EmptyState", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.42, 0),
+	Size = UDim2.new(0.8, 0, 0, 96), BackgroundTransparency = 1, ZIndex = Z.msg + 1, Parent = chatBody,
+})
+vlist(emptyState, 8, Enum.VerticalAlignment.Center, Enum.HorizontalAlignment.Center)
+local emptyTitle = new("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 32), BackgroundTransparency = 1, Font = FONT_BOLD, TextSize = 24,
+	TextColor3 = T.text, Text = "How can I help you today?", TextXAlignment = Enum.TextXAlignment.Center,
+	ZIndex = Z.msg + 2, Parent = emptyState,
+})
+local emptySub = new("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Font = FONT, TextSize = 14,
+	TextColor3 = T.textSub, Text = "Start a conversation with Aethryon AI.",
+	TextXAlignment = Enum.TextXAlignment.Center, ZIndex = Z.msg + 2, Parent = emptyState,
+})
+
+----------------------------------------------------------------------------------------------------
+-- 14. COMPOSER
+----------------------------------------------------------------------------------------------------
+local COMPOSER_MIN, COMPOSER_MAX = 48, 152
+local composerH = COMPOSER_MIN
+
+local composerHolder = new("Frame", {
+	Name = "ComposerHolder", AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 0, 1, -14),
+	Size = UDim2.new(1, 0, 0, composerH), BackgroundTransparency = 1,
+	ZIndex = Z.composer, Parent = conv,
+})
+pad(composerHolder, 18, 0, 18, 0)
+
+local composer = new("Frame", {
+	Name = "Composer", Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = T.input,
+	BorderSizePixel = 0, ZIndex = Z.composer + 1, Parent = composerHolder,
+})
+corner(composer, 12)
+stroke(composer, T.border, 0.3)
+
+local plusButton = new("TextButton", {
+	Name = "Plus", Size = UDim2.new(0, 30, 0, 30), AnchorPoint = Vector2.new(0, 1),
+	Position = UDim2.new(0, 8, 1, -9), BackgroundColor3 = T.secondary, AutoButtonColor = false,
+	Font = FONT_BOLD, TextSize = 18, TextColor3 = T.textSub, Text = "+",
+	ZIndex = Z.composer + 3, Parent = composer,
+})
+corner(plusButton, 8)
+stroke(plusButton, T.border, 0.4)
+
+local sendButton = new("ImageButton", {
+	Name = "Send", Size = UDim2.new(0, 32, 0, 32), AnchorPoint = Vector2.new(1, 1),
+	Position = UDim2.new(1, -8, 1, -8), BackgroundColor3 = T.secondary, AutoButtonColor = false,
+	Image = ICONS.send, ImageColor3 = T.accent, ScaleType = Enum.ScaleType.Fit,
+	ZIndex = Z.composer + 3, Parent = composer,
+})
+corner(sendButton, 9)
+stroke(sendButton, T.border, 0.4)
+
+local input = new("TextBox", {
+	Name = "Input", Size = UDim2.new(1, -84, 1, -16), Position = UDim2.new(0, 44, 0, 8),
+	BackgroundColor3 = T.input, BackgroundTransparency = 0, BorderSizePixel = 0,
+	Font = FONT, TextSize = 15, TextColor3 = T.text, PlaceholderColor3 = T.textMuted,
+	PlaceholderText = "Message Aethryon AI…", Text = "", ClearTextOnFocus = false,
+	MultiLine = true, TextWrapped = true, RichText = false,
+	TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+	ScrollBarThickness = 0, ZIndex = Z.composer + 2, Parent = composer,
+})
+corner(input, 8)
+
+----------------------------------------------------------------------------------------------------
+-- 15. FLOATING "A" TOGGLE (direct child of the ScreenGui, outside MainWindow)
+----------------------------------------------------------------------------------------------------
+local toggleButton = new("TextButton", {
+	Name = "AethryonToggle",
+	Size = UDim2.new(0, 52, 0, 52),
+	AnchorPoint = Vector2.new(0, 1),
+	Position = UDim2.new(0, 24, 1, -28),
+	BackgroundColor3 = T.surface,
+	AutoButtonColor = false,
+	Font = FONT_BOLD, TextSize = 24, TextColor3 = T.accent, Text = "A",
+	ZIndex = Z.toggle,
+	Active = true,
+	Parent = screenGui,
+})
+corner(toggleButton, 14)
+stroke(toggleButton, T.accent, 0.45)
+local toggleShadow = new("Frame", {
+	Size = UDim2.new(1, 16, 1, 16), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 4),
+	BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.5, BorderSizePixel = 0,
+	ZIndex = Z.toggle - 1, Active = false, Parent = toggleButton,
+})
+corner(toggleShadow, 18)
+toggleShadow.ZIndex = Z.toggle - 1
+
+----------------------------------------------------------------------------------------------------
+-- 16. FADE ENGINE (event-driven, per-message transparency)
+----------------------------------------------------------------------------------------------------
+local FADE_SIZE = 46
+local fadeMap: {[any]: any} = {}
+local feedMaids: {[any]: any} = {}
+local fadeDirty = false
+
+local function registerFade(root: any)
+	local entries: any = {}
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("TextLabel") or d:IsA("TextButton") then
+			table.insert(entries, { obj = d, prop = "TextTransparency", base = (d :: any).TextTransparency })
+		elseif d:IsA("TextBox") then
+			table.insert(entries, { obj = d, prop = "TextTransparency", base = (d :: any).TextTransparency })
+		elseif d:IsA("ImageLabel") or d:IsA("ImageButton") then
+			table.insert(entries, { obj = d, prop = "ImageTransparency", base = (d :: any).ImageTransparency })
+		elseif d:IsA("UIStroke") then
+			table.insert(entries, { obj = d, prop = "Transparency", base = (d :: any).Transparency })
+		elseif d:IsA("GuiObject") then
+			table.insert(entries, { obj = d, prop = "BackgroundTransparency", base = (d :: any).BackgroundTransparency })
+		end
+		if d:IsA("GuiObject") and not d:IsA("TextLabel") and not d:IsA("TextBox") then
+			-- frames/Images also fade their background
+			if d:IsA("ImageLabel") or d:IsA("ImageButton") then
+				table.insert(entries, { obj = d, prop = "BackgroundTransparency", base = (d :: any).BackgroundTransparency })
+			end
+		end
+	end
+	fadeMap[root] = entries
+end
+
+local function applyFade(root: any, alpha: number)
+	local entries = fadeMap[root]
+	if not entries then return end
+	for _, e in ipairs(entries) do
+		(e.obj :: any)[e.prop] = 1 - (1 - e.base) * alpha
+	end
+end
+
+local function updateFades()
+	local view = feed.AbsoluteSize.Y
+	if view <= 0 then return end
+	for _, child in ipairs(feed:GetChildren()) do
+		if child:IsA("Frame") and fadeMap[child] then
+			local top = child.AbsolutePosition.Y - feed.AbsolutePosition.Y
+			local h = child.AbsoluteSize.Y
+			local d = math.min(top, view - (top + h))
+			local a = math.clamp(d / FADE_SIZE, 0, 1)
+			a = a * a * (3 - 2 * a) -- smoothstep: content fully inside stays fully visible
+			applyFade(child, a)
+		end
+	end
+end
+
+local function requestFade()
+	if fadeDirty then return end
+	fadeDirty = true
+	task.defer(function()
+		fadeDirty = false
+		updateFades()
+	end)
+end
+
+feed:GetPropertyChangedSignal("CanvasPosition"):Connect(requestFade)
+feed:GetPropertyChangedSignal("AbsoluteSize"):Connect(requestFade)
+feedList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(requestFade)
+chatBody:GetPropertyChangedSignal("AbsoluteSize"):Connect(requestFade)
+
+----------------------------------------------------------------------------------------------------
+-- 17. REUSABLE CONTROL BUILDERS
+----------------------------------------------------------------------------------------------------
+local function makeButton(parent: any, text: string, opts: any?): any
+	opts = opts or {}
+	local b = new("TextButton", {
+		Name = opts.Name or "Button",
+		Size = opts.Size or UDim2.new(1, 0, 0, 36),
+		BackgroundColor3 = opts.bg or T.secondary,
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		Font = opts.font or FONT_MED,
+		TextSize = opts.textSize or 13,
+		TextColor3 = opts.textColor or T.text,
+		Text = text or "",
+		TextXAlignment = opts.align or Enum.TextXAlignment.Center,
+		ZIndex = opts.z or (parent.ZIndex or 10) + 2,
+		Parent = parent,
+	})
+	corner(b, opts.radius or 8)
+	if opts.stroke ~= false then stroke(b, opts.strokeColor or T.border, opts.strokeTrans or 0.4) end
+	local base, hov = opts.bg or T.secondary, opts.hover or T.hover
+	b.MouseEnter:Connect(function() if ANIM.enabled then tw(b, 0.12, { BackgroundColor3 = hov }) end end)
+	b.MouseLeave:Connect(function() tw(b, 0.14, { BackgroundColor3 = base }) end)
+	b.MouseButton1Down:Connect(function()
+		if ANIM.enabled then tw(b, 0.08, { Size = (opts.Size or UDim2.new(1, 0, 0, 36)) - UDim2.new(0, 2, 0, 2) }) end
+	end)
+	b.MouseButton1Up:Connect(function()
+		if ANIM.enabled then tw(b, 0.1, { Size = opts.Size or UDim2.new(1, 0, 0, 36) }) end
+	end)
+	if opts.onClick then b.Activated:Connect(opts.onClick) end
+	return b
+end
+
+local function makeTextField(parent: any, opts: any): any
+	local box = new("TextBox", {
+		Name = opts.Name or "Field",
+		Size = opts.Size or UDim2.new(1, 0, 0, 36),
+		BackgroundColor3 = opts.bg or T.input,
+		BorderSizePixel = 0,
+		Font = opts.font or FONT,
+		TextSize = opts.textSize or 13,
+		TextColor3 = opts.textColor or T.text,
+		PlaceholderColor3 = T.textMuted,
+		PlaceholderText = opts.placeholder or "",
+		Text = opts.text or "",
+		ClearTextOnFocus = false,
+		MultiLine = opts.multiLine == true,
+		TextWrapped = opts.multiLine == true,
+		TextXAlignment = opts.align or Enum.TextXAlignment.Left,
+		TextYAlignment = opts.multiLine and Enum.TextYAlignment.Top or Enum.TextYAlignment.Center,
+		ZIndex = (parent.ZIndex or 10) + 2,
+		Parent = parent,
+	})
+	corner(box, opts.radius or 8)
+	stroke(box, T.border, 0.4)
+	pad(box, 10, opts.multiLine and 8 or 0, 10, 0)
+	box.Focused:Connect(function() tw(box, 0.12, { BackgroundColor3 = T.hover }) end)
+	box.FocusLost:Connect(function() tw(box, 0.12, { BackgroundColor3 = opts.bg or T.input }) end)
+	return box
+end
+
+local function makeRow(parent: any, height: number, opts: any?): any
+	opts = opts or {}
+	local row = new("Frame", {
+		Name = opts.Name or "Row",
+		Size = UDim2.new(1, 0, 0, height),
+		AutomaticSize = opts.auto and Enum.AutomaticSize.Y or Enum.AutomaticSize.None,
+		BackgroundColor3 = opts.bg or T.secondary,
+		BorderSizePixel = 0,
+		LayoutOrder = opts.order or 0,
+		ZIndex = (parent.ZIndex or 10) + 1,
+		Parent = parent,
+	})
+	corner(row, opts.radius or 10)
+	if opts.stroke ~= false then stroke(row, opts.strokeColor or T.border, opts.strokeTrans or 0.45) end
+	pad(row, 14, 12, 14, 12)
+	return row
+end
+
+local function makeSectionTitle(parent: any, text: string, order: number): any
+	return new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Font = FONT_BOLD, TextSize = 13,
+		TextColor3 = T.text, Text = text, TextXAlignment = Enum.TextXAlignment.Left,
+		LayoutOrder = order, ZIndex = (parent.ZIndex or 10) + 1, Parent = parent,
+	})
+end
+
+local function makeCaption(parent: any, text: string, order: number, height: number?): any
+	return new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, height or 0), AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1, Font = FONT, TextSize = 12, TextColor3 = T.textMuted,
+		Text = text, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+		TextWrapped = true, RichText = true, LineHeight = 1.35,
+		LayoutOrder = order, ZIndex = (parent.ZIndex or 10) + 1, Parent = parent,
+	})
+end
+
+-- Generic popup list anchored to a control (rendered on the popup layer, above modals).
+local openPopup: any = nil
+local function closePopup()
+	if openPopup and openPopup.Parent then
+		local obj = openPopup
+		openPopup = nil
+		tw(obj, 0.14, { GroupTransparency = 1 })
+		task.delay(0.16, function() if obj.Parent then obj:Destroy() end end)
+	end
+end
+
+local function makePopup(anchor: any, width: number, maxHeight: number): any
+	closePopup()
+	local ap = anchor.AbsolutePosition
+	local as = anchor.AbsoluteSize
+	local vps = screenGui.AbsoluteSize
+	local w = math.min(width, vps.X - 24)
+	local x = math.clamp(ap.X, 12, vps.X - w - 12)
+	local belowSpace = vps.Y - (ap.Y + as.Y) - 12
+	local aboveSpace = ap.Y - 12
+	local height = math.min(maxHeight, math.max(belowSpace, aboveSpace))
+	local y
+	if belowSpace >= math.min(maxHeight, 180) or belowSpace >= aboveSpace then
+		y = ap.Y + as.Y + 6
+	else
+		y = ap.Y - 6 - height
+	end
+	y = math.clamp(y, 12, vps.Y - height - 12)
+
+	local panel = new("CanvasGroup", {
+		Name = "Popup", Size = UDim2.new(0, w, 0, height), Position = UDim2.new(0, x, 0, y),
+		BackgroundColor3 = T.secondary, GroupTransparency = 1, ZIndex = Z.popup,
+		BorderSizePixel = 0, Parent = popupLayer,
+	})
+	corner(panel, 12)
+	stroke(panel, T.border, 0.25)
+	local scroll = new("ScrollingFrame", {
+		Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0,
+		ScrollBarThickness = 5, ScrollBarImageColor3 = T.border, ScrollBarImageTransparency = 0.4,
+		ScrollingDirection = Enum.ScrollingDirection.Y, AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		CanvasSize = UDim2.new(0, 0, 0, 0), ZIndex = Z.popup + 1, Parent = panel,
+	})
+	vlist(scroll, 2)
+	pad(scroll, 6, 6, 6, 6)
+	tw(panel, 0.16, { GroupTransparency = 0 })
+	openPopup = panel
+	return panel, scroll
+end
+
+local function makeDropdown(parent: any, opts: any): any
+	local options = opts.options or {}
+	local selectedIndex = 1
+	for i, o in ipairs(options) do
+		if o.label == opts.selected then selectedIndex = i end
+	end
+	local btn = new("TextButton", {
+		Name = opts.Name or "Dropdown",
+		Size = opts.Size or UDim2.new(1, 0, 0, 36),
+		BackgroundColor3 = opts.bg or T.input,
+		BorderSizePixel = 0, AutoButtonColor = false,
+		Font = FONT_MED, TextSize = 13, TextColor3 = opts.textColor or T.text,
+		Text = options[selectedIndex] and options[selectedIndex].label or "—",
+		TextXAlignment = Enum.TextXAlignment.Left,
+		ZIndex = (parent.ZIndex or 10) + 2, Parent = parent,
+	})
+	corner(btn, 8)
+	stroke(btn, T.border, 0.4)
+	pad(btn, 10, 0, 26, 0)
+	local chev = new("TextLabel", {
+		Size = UDim2.new(0, 12, 0, 12), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0),
+		BackgroundTransparency = 1, Font = FONT_BOLD, TextSize = 10, TextColor3 = T.textMuted,
+		Text = "▼", ZIndex = (parent.ZIndex or 10) + 3, Parent = btn,
+	})
+
+	local api: any = {}
+	function api.setOptions(newOptions: any, keepLabel: string?)
+		options = newOptions
+		local idx = 1
+		for i, o in ipairs(options) do
+			if o.label == (keepLabel or api.current) then idx = i end
+		end
+		api.current = options[idx] and options[idx].label
+		btn.Text = api.current or "—"
+	end
+	api.current = options[selectedIndex] and options[selectedIndex].label
+	btn.Activated:Connect(function()
+		if openPopup and openPopup.Name == "Popup" and openPopup:GetAttribute("Owner") == tostring(btn) then
+			closePopup()
+			return
+		end
+		local panel, scroll = makePopup(btn, opts.popupWidth or 260, opts.popupHeight or 240)
+		panel:SetAttribute("Owner", tostring(btn))
+		for _, o in ipairs(options) do
+			local isSel = o.label == api.current
+			local row = new("TextButton", {
+				Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = isSel and T.input or T.secondary,
+				BorderSizePixel = 0, AutoButtonColor = false, Font = isSel and FONT_BOLD or FONT,
+				TextSize = 13, TextColor3 = o.disabled and T.textMuted or (isSel and T.accentHover or T.text),
+				Text = o.label, TextXAlignment = Enum.TextXAlignment.Left,
+				ZIndex = Z.popup + 2, Parent = scroll,
+			})
+			corner(row, 8)
+			pad(row, 10, 0, 10, 0)
+			if o.disabled then row.Active = false end
+			row.Activated:Connect(function()
+				if o.disabled then return end
+				api.current = o.label
+				btn.Text = o.label
+				closePopup()
+				if opts.onSelect then opts.onSelect(o) end
+			end)
+		end
+		if #options == 0 then
+			new("TextLabel", {
+				Size = UDim2.new(1, 0, 0, 40), BackgroundTransparency = 1, Font = FONT, TextSize = 12,
+				TextColor3 = T.textMuted, Text = opts.emptyText or "No options available.",
+				TextWrapped = true, ZIndex = Z.popup + 2, Parent = scroll,
+			})
+		end
+	end)
+	return api
+end
+
+local function makeToggle(parent: any, label: string, desc: string, value: boolean, onChange: any, order: number): any
+	local row = makeRow(parent, 58, { order = order })
+	local title = new("TextLabel", {
+		Size = UDim2.new(1, -60, 0, 18), Position = UDim2.new(0, 0, 0, 0), BackgroundTransparency = 1,
+		Font = FONT_MED, TextSize = 13, TextColor3 = T.text, Text = label,
+		TextXAlignment = Enum.TextXAlignment.Left, ZIndex = row.ZIndex + 1, Parent = row,
+	})
+	local caption = new("TextLabel", {
+		Size = UDim2.new(1, -60, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Position = UDim2.new(0, 0, 0, 20),
+		BackgroundTransparency = 1, Font = FONT, TextSize = 11, TextColor3 = T.textMuted, Text = desc,
+		TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true, LineHeight = 1.3,
+		ZIndex = row.ZIndex + 1, Parent = row,
+	})
+	local knobHolder = new("TextButton", {
+		Size = UDim2.new(0, 46, 0, 26), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0),
+		BackgroundColor3 = value and T.accent or T.input, BorderSizePixel = 0, AutoButtonColor = false,
+		Text = "", ZIndex = row.ZIndex + 2, Parent = row,
+	})
+	corner(knobHolder, 13)
+	local knob = new("Frame", {
+		Size = UDim2.new(0, 20, 0, 20), AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, value and 23 or 3, 0.5, 0),
+		BackgroundColor3 = T.text, BorderSizePixel = 0, ZIndex = row.ZIndex + 3, Parent = knobHolder,
+	})
+	corner(knob, 10)
+	local state = value
+	knobHolder.Activated:Connect(function()
+		state = not state
+		tw(knobHolder, 0.16, { BackgroundColor3 = state and T.accent or T.input })
+		tw(knob, 0.16, { Position = UDim2.new(0, state and 23 or 3, 0.5, 0) })
+		if onChange then onChange(state) end
+	end)
+	return row
+end
+
+local function makeSlider(parent: any, opts: any): any
+	local min, max, value = opts.min or 0, opts.max or 1, opts.value or 0
+	local row = makeRow(parent, 64, { order = opts.order or 0 })
+	local title = new("TextLabel", {
+		Size = UDim2.new(0.5, 0, 0, 18), BackgroundTransparency = 1, Font = FONT_MED, TextSize = 13,
+		TextColor3 = T.text, Text = opts.label or "", TextXAlignment = Enum.TextXAlignment.Left,
+		ZIndex = row.ZIndex + 1, Parent = row,
+	})
+	local readout = new("TextLabel", {
+		Size = UDim2.new(0.5, 0, 0, 18), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0),
+		BackgroundTransparency = 1, Font = FONT_BOLD, TextSize = 13, TextColor3 = T.accentHover,
+		Text = tostring(value), TextXAlignment = Enum.TextXAlignment.Right,
+		ZIndex = row.ZIndex + 1, Parent = row,
+	})
+	local track = new("TextButton", {
+		Size = UDim2.new(1, 0, 0, 6), Position = UDim2.new(0, 0, 0, 42), BackgroundColor3 = T.input,
+		BorderSizePixel = 0, AutoButtonColor = false, Text = "", ZIndex = row.ZIndex + 1, Parent = row,
+	})
+	corner(track, 3)
+	local fill = new("Frame", {
+		Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = T.accent, BorderSizePixel = 0,
+		ZIndex = row.ZIndex + 2, Parent = track,
+	})
+	corner(fill, 3)
+	local knob = new("Frame", {
+		Size = UDim2.new(0, 16, 0, 16), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, 0, 0.5, 0),
+		BackgroundColor3 = T.accentHover, BorderSizePixel = 0, ZIndex = row.ZIndex + 3, Parent = track,
+	})
+	corner(knob, 8)
+
+	local decimals = opts.decimals or 2
+	local function fmt(v: number): string
+		if decimals <= 0 then return tostring(math.floor(v + 0.5)) end
+		return string.format("%." .. tostring(decimals) .. "f", v)
+	end
+	local current = value
+	local function paint(v: number)
+		local ratio = math.clamp((v - min) / (max - min), 0, 1)
+		fill.Size = UDim2.new(ratio, 0, 1, 0)
+		knob.Position = UDim2.new(ratio, 0, 0.5, 0)
+		readout.Text = (opts.prefix or "") .. fmt(v) .. (opts.suffix or "")
+	end
+	local function setFromX(absX: number)
+		local ratio = math.clamp((absX - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
+		local raw = min + ratio * (max - min)
+		local stepped = raw
+		if opts.step and opts.step > 0 then
+			stepped = math.floor(raw / opts.step + 0.5) * opts.step
+		end
+		current = math.clamp(stepped, min, max)
+		paint(current)
+		if opts.onChange then opts.onChange(current) end
+	end
+	local dragging = false
+	track.InputBegan:Connect(function(inputObj)
+		if inputObj.UserInputType == Enum.UserInputType.MouseButton1 or inputObj.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			setFromX(inputObj.Position.X)
+		end
+	end)
+	local moveConn = UserInputService.InputChanged:Connect(function(inputObj)
+		if not dragging then return end
+		if inputObj.UserInputType == Enum.UserInputType.MouseMovement or inputObj.UserInputType == Enum.UserInputType.Touch then
+			setFromX(inputObj.Position.X)
+		end
+	end)
+	local endConn = UserInputService.InputEnded:Connect(function(inputObj)
+		if inputObj.UserInputType == Enum.UserInputType.MouseButton1 or inputObj.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+	paint(current)
+
+	local api: any = {}
+	function api.set(v: number)
+		current = math.clamp(v, min, max)
+		paint(current)
+	end
+	function api.get(): number return current end
+	function api.destroy()
+		moveConn:Disconnect()
+		endConn:Disconnect()
+	end
+	return api
+end
+
+----------------------------------------------------------------------------------------------------
+-- 18. CODE BLOCK RENDERING
+----------------------------------------------------------------------------------------------------
+local function makeCodeBlock(code: string, langTag: string, width: number): any
+	local title, hlKey = langInfo(langTag)
+	local container = new("Frame", {
+		Name = "CodeBlock", Size = UDim2.new(1, 0, 0, 100), BackgroundColor3 = T.code,
+		BorderSizePixel = 0, ZIndex = Z.msg + 4, Parent = nil,
+	})
+	corner(container, 10)
+	stroke(container, T.border, 0.35)
+
+	local headerBar = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = T.secondary, BorderSizePixel = 0,
+		ZIndex = Z.msg + 5, Parent = container,
+	})
+	corner(headerBar, 10)
+	local headerPatch = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 10), AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 0, 1, 0),
+		BackgroundColor3 = T.secondary, BorderSizePixel = 0, ZIndex = Z.msg + 5, Parent = headerBar,
+	})
+	local codeTitle = new("TextLabel", {
+		Size = UDim2.new(1, -90, 1, 0), Position = UDim2.new(0, 12, 0, 0), BackgroundTransparency = 1,
+		Font = FONT_BOLD, TextSize = 11, TextColor3 = T.textSub, Text = title,
+		TextXAlignment = Enum.TextXAlignment.Left, ZIndex = Z.msg + 6, Parent = headerBar,
+	})
+	local copyBtn = new("TextButton", {
+		Size = UDim2.new(0, 62, 0, 22), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0),
+		BackgroundColor3 = T.input, BorderSizePixel = 0, AutoButtonColor = false,
+		Font = FONT_MED, TextSize = 11, TextColor3 = T.textSub, Text = "Copy",
+		ZIndex = Z.msg + 6, Parent = headerBar,
+	})
+	corner(copyBtn, 6)
+	stroke(copyBtn, T.border, 0.35)
+
+	local textSize = 13
+	local measured = TextService:GetTextSize(code, textSize, FONT_CODE, Vector2.new(10000, 100000))
+	local viewW = math.max(width - 24, 80)
+	local codeH = math.clamp(measured.Y + 10, 26, 320)
+	local codeScroll = new("ScrollingFrame", {
+		Size = UDim2.new(1, 0, 0, codeH), Position = UDim2.new(0, 0, 0, 30),
+		BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 6,
+		ScrollBarImageColor3 = T.border, ScrollBarImageTransparency = 0.35,
+		ScrollingDirection = Enum.ScrollingDirection.XY, AutomaticCanvasSize = Enum.AutomaticSize.XY,
+		CanvasSize = UDim2.new(0, 0, 0, 0), ZIndex = Z.msg + 5, Parent = container,
+	})
+	pad(codeScroll, 10, 6, 10, 6)
+	local codeText = new("TextBox", {
+		Name = "CodeText",
+		Size = UDim2.new(0, math.max(measured.X + 8, viewW), 0, math.max(measured.Y + 4, codeH - 12)),
+		Position = UDim2.new(0, 0, 0, 0),
+		BackgroundColor3 = T.code, BorderSizePixel = 0,
+		Font = FONT_CODE, TextSize = textSize, TextColor3 = T.text,
+		Text = highlight(code, hlKey), RichText = true, MultiLine = true, TextWrapped = false,
+		TextEditable = false, ClearTextOnFocus = false, ScrollBarThickness = 0,
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+		ZIndex = Z.msg + 6, Parent = codeScroll,
+	})
+	container.Size = UDim2.new(1, 0, 0, 30 + codeH + 8)
+
+	local copyMaid = maid()
+	copyBtn.MouseEnter:Connect(function() tw(copyBtn, 0.12, { BackgroundColor3 = T.hover }) end)
+	copyBtn.MouseLeave:Connect(function() tw(copyBtn, 0.12, { BackgroundColor3 = T.input }) end)
+	copyBtn.Activated:Connect(function()
+		local ok, msg = copyToClipboard(code) -- exact source text, no title, no fences
+		if ok then
+			copyBtn.Text = "Copied!"
+			copyBtn.TextColor3 = T.success
+			task.delay(1.5, function()
+				if copyBtn.Parent then
+					copyBtn.Text = "Copy"
+					copyBtn.TextColor3 = T.textSub
+				end
+			end)
+		else
+			copyBtn.Text = "Failed"
+			copyBtn.TextColor3 = T.error
+			notify({ title = "Copy failed", desc = msg, kind = "error" })
+			task.delay(1.5, function()
+				if copyBtn.Parent then
+					copyBtn.Text = "Copy"
+					copyBtn.TextColor3 = T.textSub
+				end
+			end)
+		end
+	end)
+	container.Destroying:Connect(function() copyMaid.clean() end)
+	return container
+end
+
+----------------------------------------------------------------------------------------------------
+-- 19. MESSAGE RENDERING
+----------------------------------------------------------------------------------------------------
+local function plainOf(text: string): string
+	local out = text:gsub("```.-```", " ")
+	out = out:gsub("`", "")
+	out = out:gsub("%*", "")
+	out = out:gsub("#+", "")
+	out = out:gsub("\n+", " ")
+	return out
+end
+
+-- Collapse preview for long USER messages (>= 300 chars).
+local function previewOf(text: string): string?
+	if #text < 300 then return nil end
+	local cut = text:sub(1, 285)
+	local lastSpace = cut:match("^.*()%s")
+	if lastSpace and (lastSpace :: number) > 180 then
+		cut = cut:sub(1, (lastSpace :: number) - 1)
+	end
+	local fenceCount = select(2, cut:gsub("```", ""))
+	if fenceCount % 2 == 1 then cut ..= "\n```" end
+	return cut .. "…"
+end
+
+local function makeBubble(msg: any, maxWidth: number): any
+	local isUser = msg.role == "user"
+	local wrap = new("Frame", {
+		Name = "Message", Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = Z.msg, Parent = nil,
+	})
+	local wrapList = vlist(wrap, 6)
+
+	local row = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1, LayoutOrder = 1, ZIndex = Z.msg + 1, Parent = wrap,
+	})
+	hlist(row, 0, isUser and Enum.HorizontalAlignment.Right or Enum.HorizontalAlignment.Left)
+
+	local displayText = msg.content or ""
+	local collapsed = false
+	if isUser and msg.expanded ~= true then
+		local prev = previewOf(displayText)
+		if prev then
+			displayText = prev
+			collapsed = true
+		end
+	end
+
+	local blocks = parseBlocks(displayText)
+	local hasCode = false
+	for _, b in ipairs(blocks) do
+		if b.kind == "code" then hasCode = true end
+	end
+
+	local bubbleWidth
+	if hasCode then
+		bubbleWidth = maxWidth
+	else
+		local measured = TextService:GetTextSize(plainOf(displayText), 15, FONT, Vector2.new(maxWidth - 28, 100000))
+		bubbleWidth = math.clamp(math.ceil(measured.X) + 30, 110, maxWidth)
+	end
+
+	local bubble = new("Frame", {
+		Name = "Bubble", Size = UDim2.new(0, bubbleWidth, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = isUser and T.secondary or T.secondary,
+		BorderSizePixel = 0, ZIndex = Z.msg + 2, Parent = row,
+	})
+	corner(bubble, 12)
+	stroke(bubble, isUser and T.accent or T.border, isUser and 0.45 or 0.35)
+	if isUser then
+		local tint = new("Frame", {
+			Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = T.accent, BackgroundTransparency = 0.9,
+			BorderSizePixel = 0, ZIndex = Z.msg + 2, Parent = bubble,
+		})
+		corner(tint, 12)
+	end
+	pad(bubble, 13, 11, 13, 11)
+	vlist(bubble, 8)
+
+	local roleTag = new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1, Font = FONT_BOLD, TextSize = 10,
+		TextColor3 = isUser and T.accentHover or T.textMuted,
+		Text = isUser and "YOU" or "AETHRYON", TextXAlignment = Enum.TextXAlignment.Left,
+		ZIndex = Z.msg + 3, Parent = bubble,
+	})
+
+	for _, b in ipairs(blocks) do
+		if b.kind == "code" then
+			local cb = makeCodeBlock(b.value, b.lang, bubbleWidth - 26)
+			cb.Parent = bubble
+			cb.ZIndex = Z.msg + 3
+			for _, d in ipairs(cb:GetDescendants()) do
+				if d:IsA("GuiObject") then (d :: any).ZIndex = (d :: any).ZIndex end
+			end
+		else
+			local para = new("TextLabel", {
+				Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+				BackgroundTransparency = 1, Font = FONT, TextSize = 15, TextColor3 = T.text,
+				Text = mdInline(b.value), RichText = true, TextWrapped = true,
+				TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+				LineHeight = 1.4, ZIndex = Z.msg + 3, Parent = bubble,
+			})
+		end
+	end
+
+	if collapsed or (isUser and msg.expanded == true and previewOf(msg.content or "") ~= nil) then
+		local btnRow = new("Frame", {
+			Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1, LayoutOrder = 2,
+			ZIndex = Z.msg + 1, Parent = wrap,
+		})
+		hlist(btnRow, 0, Enum.HorizontalAlignment.Right)
+		local showLabel = (msg.expanded == true) and "Show Less" or "Show More"
+		local showBtn = new("TextButton", {
+			Size = UDim2.new(0, 92, 0, 22), BackgroundColor3 = T.input, BorderSizePixel = 0,
+			AutoButtonColor = false, Font = FONT_MED, TextSize = 11, TextColor3 = T.accentHover,
+			Text = showLabel, ZIndex = Z.msg + 2, Parent = btnRow,
+		})
+		corner(showBtn, 7)
+		stroke(showBtn, T.border, 0.4)
+		showBtn.MouseEnter:Connect(function() tw(showBtn, 0.12, { BackgroundColor3 = T.hover }) end)
+		showBtn.MouseLeave:Connect(function() tw(showBtn, 0.12, { BackgroundColor3 = T.input }) end)
+		wrap:SetAttribute("ShowMoreButton", true)
+		showBtn.Activated:Connect(function()
+			msg.expanded = not (msg.expanded == true)
+			if wrap:FindFirstAncestorOfClass("ScreenGui") then
+				-- handled by the caller through the re-render hook below
+			end
+			if wrap:GetAttribute("OnToggle") == nil then
+				wrap:SetAttribute("ToggleExpand", not (msg.expanded == true))
+			end
+			wrap:SetAttribute("RequestExpand", true)
+			if wrap:GetAttribute("ExpandCallback") ~= nil then end
+			if wrap:FindFirstChild("__toggle") then end
+			-- The chat controller listens for this attribute.
+			wrap:SetAttribute("ExpandSignal", (wrap:GetAttribute("ExpandSignal") or 0) + 1)
+		end)
+	end
+
+	return wrap
+end
+
+----------------------------------------------------------------------------------------------------
+-- 20. CHAT STATE, RENDERING AND SENDING
+----------------------------------------------------------------------------------------------------
+local function newId(): string
+	return HttpService:GenerateGUID(false)
+end
+
+local function activeConversation(): any
+	for _, c in ipairs(Config.conversations) do
+		if c.id == Config.activeId then return c end
+	end
+	return nil
+end
+
+local function ensureConversation(): any
+	local c = activeConversation()
+	if c then return c end
+	if #Config.conversations == 0 then
+		c = { id = newId(), title = "New Chat", messages = {}, updatedAt = os.time() }
+		table.insert(Config.conversations, c)
+	end
+	c = Config.conversations[1]
+	Config.activeId = c.id
+	return c
+end
+
+local function conversationTitle(c: any): string
+	for _, m in ipairs(c.messages) do
+		if m.role == "user" then
+			local p = plainOf(m.content or "")
+			p = p:gsub("^%s+", "")
+			if #p > 0 then return (#p > 38) and (p:sub(1, 38) .. "…") or p end
+		end
+	end
+	return "New Chat"
+end
+
+local renderMaid = maid()
+local function clearFeed()
+	renderMaid.clean()
+	for _, c in ipairs(feed:GetChildren()) do
+		if c:IsA("Frame") then
+			fadeMap[c] = nil
+			c:Destroy()
+		end
+	end
+	fadeMap = {}
+end
+
+local function scrollFeedToBottom()
+	local target = math.max(0, feedList.AbsoluteContentSize.Y - feed.AbsoluteSize.Y)
+	feed.CanvasPosition = Vector2.new(0, target)
+	requestFade()
+end
+
+local function renderConversation()
+	clearFeed()
+	local c = ensureConversation()
+	local maxW = math.max(feed.AbsoluteSize.X - 44, 220)
+	for _, m in ipairs(c.messages) do
+		local wrap = makeBubble(m, maxW)
+		wrap.Parent = feed
+		zindex(wrap, Z.msg)
+		registerFade(wrap)
+		-- per-message expand wiring (only this message is affected)
+		local showBtn = nil
+		for _, d in ipairs(wrap:GetDescendants()) do
+			if d:IsA("TextButton") and (d.Text == "Show More" or d.Text == "Show Less") then showBtn = d end
+		end
+		if showBtn then
+			showBtn.Activated:Connect(function()
+				m.expanded = not (m.expanded == true)
+				local keepScroll = feed.CanvasPosition
+				renderConversation()
+				task.defer(function()
+					feed.CanvasPosition = keepScroll
+					requestFade()
+				end)
+			end)
+		end
+		renderMaid.add(wrap:GetPropertyChangedSignal("AbsoluteSize"):Connect(requestFade))
+	end
+	emptyState.Visible = (#c.messages == 0)
+	task.defer(function()
+		scrollFeedToBottom()
+		updateFades()
+	end)
+	renderHistory()
+end
+
+function renderHistory() end -- forward: defined in section 21
+
+local function persist()
+	saveConfig()
+end
+
+local function addMessage(role: string, content: string, flags: any?): any
+	local c = ensureConversation()
+	local msg: any = { role = role, content = content, ts = os.time() }
+	if flags then
+		for k, v in pairs(flags) do msg[k] = v end
+	end
+	table.insert(c.messages, msg)
+	c.title = conversationTitle(c)
+	c.updatedAt = os.time()
+	-- Keep local history bounded.
+	if #c.messages > 200 then
+		table.remove(c.messages, 1)
+	end
+	while #Config.conversations > 30 do
+		table.remove(Config.conversations, 1)
+	end
+	persist()
+	return msg
+end
+
+local function requestParams(): any
+	local spec, chosen = resolveThinking(Config.activeProvider)
+	return {
+		maxTokens = Config.maxTokens,
+		temperature = Config.temperature,
+		systemPrompt = Config.systemPrompt,
+		thinkingSupported = spec.supported,
+		thinkingParam = spec.param,
+		thinkingValue = chosen.value,
+	}
+end
+
+local function previewReply(userText: string, missing: {string}): string
+	local p = Config.providers[Config.activeProvider]
+	local name = p and p.name or "the selected provider"
+	return string.format(
+		"**Preview response — no request was sent to any provider.**\n\n"
+		.. "Aethryon AI is running in UI preview mode: %s is missing for %s.\n"
+		.. "Open **Settings → Providers**, add a key, press **Fetch AI Models**, pick a model, then send again for a real response.\n\n"
+		.. "Your message was received locally (%d characters) and is stored in this conversation only.",
+		table.concat(missing, " and "), name, #userText
+	)
+end
+
+local function sendCurrentMessage()
+	local text = input.Text
+	if text:gsub("%s", "") == "" then return end
+	input.Text = ""
+	composerH = COMPOSER_MIN
+	tw(composer, 0.14, { Size = UDim2.new(1, 0, 1, 0) })
+	composerHolder.Size = UDim2.new(1, 0, 0, composerH)
+	feed.Size = UDim2.new(1, 0, 1, -(composerH + 28))
+	chatBody.Size = UDim2.new(1, 0, 1, -58 - composerH - 28)
+
+	addMessage("user", text)
+	renderConversation()
+
+	local p = Config.providers[Config.activeProvider]
+	local missing: {string} = {}
+	if not p or p.apiKey == "" then table.insert(missing, "an API key") end
+	if not p or p.model == "" then table.insert(missing, "a selected model") end
+
+	if #missing > 0 then
+		addMessage("assistant", previewReply(text, missing), { preview = true })
+		renderConversation()
+		notify({
+			title = "Preview response",
+			desc = "No request was sent — " .. table.concat(missing, " and ") .. " is not configured.",
+			kind = "warn",
+		})
+		return
+	end
+
+	local pending = addMessage("assistant", "Sending request…", { pending = true })
+	renderConversation()
+
+	task.spawn(function()
+		local history = {}
+		local c = ensureConversation()
+		for _, m in ipairs(c.messages) do
+			if not m.pending and not m.preview and m.role ~= "system" then
+				table.insert(history, { role = (m.role == "assistant") and "assistant" or "user", content = m.content })
+			end
+		end
+		local params = requestParams()
+		local impl = Providers[Config.activeProvider]
+		local ok, text2, err = false, "", "Unsupported provider."
+		if impl then
+			ok, text2, err = impl.chat(p, history, params)
+		end
+		if ok then
+			pending.content = text2
+			pending.pending = nil
+		else
+			pending.content = "**Request failed — no AI response was produced.**\n\n"
+				.. sanitize(err) .. "\n\n"
+				.. "This is an honest failure report, not a model response. Check the Base URL, API key and model in **Settings → Providers**."
+			pending.pending = nil
+			pending.failed = true
+			notify({ title = "Request failed", desc = sanitize(err), kind = "error" })
+		end
+		persist()
+		renderConversation()
+	end)
+end
+
+----------------------------------------------------------------------------------------------------
+-- 21. SIDEBAR BEHAVIOUR
+----------------------------------------------------------------------------------------------------
+local function makeSideButton(order: number, iconId: string, label: string, onClick: any): any
+	local btn = new("TextButton", {
+		Name = label .. "Button", Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = T.sidebar,
+		BorderSizePixel = 0, AutoButtonColor = false, Text = "", LayoutOrder = order,
+		ZIndex = Z.side + 3, Parent = topControls,
+	})
+	corner(btn, 9)
+	local ic = iconLabel(iconId, 18, T.textSub, btn)
+	ic.Position = UDim2.new(0, 10, 0.5, 0)
+	ic.AnchorPoint = Vector2.new(0, 0.5)
+	ic.ZIndex = Z.side + 4
+	local lbl = new("TextLabel", {
+		Name = "Label", Size = UDim2.new(1, -44, 1, 0), Position = UDim2.new(0, 38, 0, 0),
+		BackgroundTransparency = 1, Font = FONT_MED, TextSize = 13, TextColor3 = T.textSub,
+		Text = label, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = Z.side + 4, Parent = btn,
+	})
+	btn.MouseEnter:Connect(function()
+		tw(btn, 0.12, { BackgroundColor3 = T.secondary })
+		tw(ic, 0.12, { ImageColor3 = T.accentHover })
+		tw(lbl, 0.12, { TextColor3 = T.text })
+	end)
+	btn.MouseLeave:Connect(function()
+		tw(btn, 0.14, { BackgroundColor3 = T.sidebar })
+		tw(ic, 0.14, { ImageColor3 = T.textSub })
+		tw(lbl, 0.14, { TextColor3 = T.textSub })
+	end)
+	btn.Activated:Connect(onClick)
+	return { button = btn, icon = ic, label = lbl }
+end
+
+local collapseBtn = makeSideButton(1, ICONS.collapse, "Collapse", function() setSidebarCollapsed(not sidebarCollapsed) end)
+local newChatRef = makeSideButton(2, ICONS.newChat, "New Chat", function()
+	local c = { id = newId(), title = "New Chat", messages = {}, updatedAt = os.time() }
+	table.insert(Config.conversations, 1, c)
+	Config.activeId = c.id
+	persist()
+	renderConversation()
+	notify({ title = "New chat", desc = "Started a fresh local conversation.", kind = "info", duration = 3 })
+end)
+local searchRef = makeSideButton(3, ICONS.search, "Search", function()
+	if sidebarCollapsed then setSidebarCollapsed(false) end
+	searchBox.Visible = not searchBox.Visible
+	if searchBox.Visible then
+		searchBox:CaptureFocus()
+	else
+		searchBox.Text = ""
+		renderHistory()
+	end
+end)
+
+local settingsRef = makeSideButton(10, ICONS.settings, "Settings", function() openSettings("Settings") end)
+
+local profileRow = new("TextButton", {
+	Name = "Profile", Size = UDim2.new(1, 0, 0, 44), BackgroundColor3 = T.secondary,
+	BorderSizePixel = 0, AutoButtonColor = false, Text = "", LayoutOrder = 11,
+	ZIndex = Z.side + 3, Parent = bottomControls,
+})
+corner(profileRow, 10)
+stroke(profileRow, T.border, 0.35)
+local avatar = new("ImageLabel", {
+	Name = "Avatar", Size = UDim2.new(0, 30, 0, 30), Position = UDim2.new(0, 7, 0.5, 0),
+	AnchorPoint = Vector2.new(0, 0.5), BackgroundColor3 = T.input, BorderSizePixel = 0,
+	Image = "", ScaleType = Enum.ScaleType.Crop, ZIndex = Z.side + 4, Parent = profileRow,
+})
+corner(avatar, 15)
+local profileName = new("TextLabel", {
+	Size = UDim2.new(1, -48, 0, 16), Position = UDim2.new(0, 43, 0, 6), BackgroundTransparency = 1,
+	Font = FONT_MED, TextSize = 12, TextColor3 = T.text, Text = "Profile",
+	TextXAlignment = Enum.TextXAlignment.Left, ZIndex = Z.side + 4, Parent = profileRow,
+})
+local profileSub = new("TextLabel", {
+	Size = UDim2.new(1, -48, 0, 14), Position = UDim2.new(0, 43, 0, 23), BackgroundTransparency = 1,
+	Font = FONT, TextSize = 10, TextColor3 = T.textMuted, Text = "@player",
+	TextXAlignment = Enum.TextXAlignment.Left, ZIndex = Z.side + 4, Parent = profileRow,
+})
+profileRow.Activated:Connect(function() openSettings("Profile") end)
+
+function setSidebarCollapsed(collapsed: boolean)
+	sidebarCollapsed = collapsed
+	Config.ui.sidebarCollapsed = collapsed
+	local w = collapsed and SIDEBAR_W_SHUT or SIDEBAR_W_OPEN
+	tw(sidebar, 0.26, { Size = UDim2.new(0, w, 1, 0) })
+	tw(conv, 0.26, { Position = UDim2.new(0, w, 0, 0), Size = UDim2.new(1, -w, 1, 0) })
+	collapseBtn.icon.Image = collapsed and ICONS.expand or ICONS.collapse
+	for _, ref in ipairs({ collapseBtn, newChatRef, searchRef, settingsRef }) do
+		ref.label.Visible = not collapsed
+	end
+	profileName.Visible = not collapsed
+	profileSub.Visible = not collapsed
+	historyLabel.Visible = not collapsed
+	if collapsed and searchBox.Visible then
+		searchBox.Visible = false
+	end
+	persist()
+end
+
+local historyMaid = maid()
+function renderHistory()
+	historyMaid.clean()
+	for _, c in ipairs(historyScroll:GetChildren()) do
+		if c:IsA("TextButton") then c:Destroy() end
+	end
+	local filter = searchBox.Visible and searchBox.Text:lower() or ""
+	local any = false
+	for _, c in ipairs(Config.conversations) do
+		local title = conversationTitle(c)
+		if filter == "" or title:lower():find(filter, 1, true) then
+			any = true
+			local isActive = c.id == Config.activeId
+			local entry = new("TextButton", {
+				Name = "HistoryEntry", Size = UDim2.new(1, 0, 0, 34),
+				BackgroundColor3 = isActive and T.secondary or T.sidebar,
+				BorderSizePixel = 0, AutoButtonColor = false, Text = "",
+				ZIndex = Z.side + 3, Parent = historyScroll,
+			})
+			corner(entry, 8)
+			local st = stroke(entry, isActive and T.accent or T.border, isActive and 0.3 or 0.65)
+			local ic = iconLabel(ICONS.chat, 15, isActive and T.accentHover or T.textMuted, entry)
+			ic.Position = UDim2.new(0, sidebarCollapsed and 16 or 10, 0.5, 0)
+			ic.AnchorPoint = Vector2.new(0, 0.5)
+			ic.ZIndex = Z.side + 4
+			local lbl = new("TextLabel", {
+				Size = UDim2.new(1, -44, 1, 0), Position = UDim2.new(0, 32, 0, 0), BackgroundTransparency = 1,
+				Font = isActive and FONT_MED or FONT, TextSize = 12,
+				TextColor3 = isActive and T.text or T.textSub, Text = title,
+				TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+				Visible = not sidebarCollapsed, ZIndex = Z.side + 4, Parent = entry,
+			})
+			entry.MouseEnter:Connect(function() if not isActive then tw(entry, 0.12, { BackgroundColor3 = T.secondary }) end end)
+			entry.MouseLeave:Connect(function() if not isActive then tw(entry, 0.12, { BackgroundColor3 = T.sidebar }) end end)
+			historyMaid.add(entry.Activated:Connect(function()
+				Config.activeId = c.id
+				persist()
+				renderConversation()
+			end))
+		end
+	end
+	if not any then
+		local empty = new("TextLabel", {
+			Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1, Font = FONT, TextSize = 12,
+			TextColor3 = T.textMuted, Text = filter ~= "" and "No chats match." or "No saved chats.",
+			ZIndex = Z.side + 3, Parent = historyScroll,
+		})
+		historyMaid.add(empty.AncestryChanged:Connect(function() end))
+	end
+end
+searchBox:GetPropertyChangedSignal("Text"):Connect(renderHistory)
+
+----------------------------------------------------------------------------------------------------
+-- 22. HEADER PROVIDER / MODEL SWITCHER
+----------------------------------------------------------------------------------------------------
+local function modelOptions(providerId: string): (any, any)
+	local p = Config.providers[providerId]
+	local working, broken = {}, {}
+	for _, m in ipairs(p and p.models or {}) do
+		local entry = {
+			id = m.id,
+			status = m.status or "unknown",
+			reason = m.reason,
+			disabled = (m.status == "deprecated" or m.status == "unavailable"),
+		}
+		if entry.disabled then table.insert(broken, entry) else table.insert(working, entry) end
+	end
+	table.sort(working, function(a, b) return a.id < b.id end)
+	table.sort(broken, function(a, b) return a.id < b.id end)
+	return working, broken
+end
+
+local function statusLabel(entry: any): string
+	if entry.status == "deprecated" then return entry.reason or "Deprecated" end
+	if entry.status == "unavailable" then return entry.reason or "Unavailable" end
+	return "Unknown"
+end
+
+-- Builds the model list (used by the header switcher). Keeps "Non-working Models" at the bottom.
+local function buildModelList(scroll: any, providerId: string, onPick: any)
+	local p = Config.providers[providerId]
+	local working, broken = modelOptions(providerId)
+
+	if #working == 0 and #broken == 0 then
+		local hint = new("TextLabel", {
+			Size = UDim2.new(1, 0, 0, 62), BackgroundTransparency = 1, Font = FONT, TextSize = 12,
+			TextColor3 = T.textMuted, Text = "No models have been fetched for this provider yet.\nOpen Settings → Providers and press \"Fetch AI Models\".",
+			TextWrapped = true, LineHeight = 1.35, ZIndex = Z.popup + 2, Parent = scroll,
+		})
+		return
+	end
+
+	for _, m in ipairs(working) do
+		local isSel = p and p.model == m.id
+		local row = new("TextButton", {
+			Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = isSel and T.input or T.secondary,
+			BorderSizePixel = 0, AutoButtonColor = false, Font = isSel and FONT_BOLD or FONT,
+			TextSize = 13, TextColor3 = isSel and T.accentHover or T.text,
+			Text = (isSel and "✓ " or "") .. m.id, TextXAlignment = Enum.TextXAlignment.Left,
+			ZIndex = Z.popup + 2, Parent = scroll,
+		})
+		corner(row, 8)
+		pad(row, 10, 0, 10, 0)
+		if m.status == "unknown" then
+			local tag = new("TextLabel", {
+				Size = UDim2.new(0, 58, 0, 14), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0),
+				BackgroundTransparency = 1, Font = FONT, TextSize = 10, TextColor3 = T.textMuted,
+				Text = "Unknown", TextXAlignment = Enum.TextXAlignment.Right, ZIndex = Z.popup + 3, Parent = row,
+			})
+		end
+		row.Activated:Connect(function() onPick(m.id) end)
+	end
+
+	if #broken > 0 then
+		local sep = new("TextLabel", {
+			Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1, Font = FONT_BOLD, TextSize = 11,
+			TextColor3 = T.warn, Text = "Non-working Models", TextXAlignment = Enum.TextXAlignment.Left,
+			ZIndex = Z.popup + 2, Parent = scroll,
+		})
+		for _, m in ipairs(broken) do
+			local row = new("TextButton", {
+				Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = T.secondary, BorderSizePixel = 0,
+				AutoButtonColor = false, Active = false, Font = FONT, TextSize = 12,
+				TextColor3 = T.textMuted, TextXAlignment = Enum.TextXAlignment.Left,
+				Text = "", ZIndex = Z.popup + 2, Parent = scroll,
+			})
+			corner(row, 8)
+			local name = new("TextLabel", {
+				Size = UDim2.new(1, -80, 0, 16), Position = UDim2.new(0, 10, 0, 6), BackgroundTransparency = 1,
+				Font = FONT, TextSize = 12, TextColor3 = T.textMuted, Text = m.id,
+				TextXAlignment = Enum.TextXAlignment.Left, ZIndex = Z.popup + 3, Parent = row,
+			})
+			local strike = new("Frame", {
+				Size = UDim2.new(0, TextService:GetTextSize(m.id, 12, FONT, Vector2.new(300, 20)).X, 0, 1),
+				Position = UDim2.new(0, 10, 0, 14), BackgroundColor3 = T.textMuted, BorderSizePixel = 0,
+				ZIndex = Z.popup + 4, Parent = row,
+			})
+			local st = new("TextLabel", {
+				Size = UDim2.new(1, -20, 0, 14), Position = UDim2.new(0, 10, 0, 20), BackgroundTransparency = 1,
+				Font = FONT, TextSize = 10, TextColor3 = T.warn, Text = statusLabel(m),
+				TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+				ZIndex = Z.popup + 3, Parent = row,
+			})
+			local tag = new("TextLabel", {
+				Size = UDim2.new(0, 70, 0, 14), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0),
+				BackgroundTransparency = 1, Font = FONT_BOLD, TextSize = 10, TextColor3 = T.textMuted,
+				Text = "Disabled", TextXAlignment = Enum.TextXAlignment.Right, ZIndex = Z.popup + 3, Parent = row,
+			})
+		end
+	end
+end
+
+local function refreshProviderButton()
+	local p = Config.providers[Config.activeProvider]
+	local modelText = (p and p.model and p.model ~= "") and p.model or "no model"
+	providerButton.Text = (p and p.name or "Provider") .. " · " .. modelText
+	local configured = p and p.apiKey ~= "" and p.model ~= ""
+	previewBadge.Visible = not configured
+	previewBadge.Text = configured and "" or "UI PREVIEW"
+	previewBadge.Size = UDim2.new(0, configured and 0 or 96, 0, 24)
+	providerChevron.Text = "▼"
+end
+
+local function selectModel(providerId: string, modelId: string)
+	local p = Config.providers[providerId]
+	if not p then return end
+	p.model = modelId
+	local spec = thinkingSpec(providerId)
+	if not spec.supported then
+		p.thinking = (spec.levels[spec.defaultIndex] or spec.levels[1]).label
+	else
+		local valid = false
+		for _, l in ipairs(spec.levels) do
+			if l.label == p.thinking then valid = true end
+		end
+		if not valid then p.thinking = (spec.levels[spec.defaultIndex] or spec.levels[1]).label end
+	end
+	refreshProviderButton()
+	persist()
+	notify({ title = "Model selected", desc = p.name .. " → " .. modelId, kind = "info", duration = 3 })
+end
+
+providerButton.Activated:Connect(function()
+	if openPopup and openPopup:GetAttribute("Owner") == tostring(providerButton) then
+		closePopup()
+		return
+	end
+	local panel, scroll = makePopup(providerButton, 300, 320)
+	panel:SetAttribute("Owner", tostring(providerButton))
+	local expanded: {[string]: boolean} = {}
+	for _, pid in ipairs(providerOrder()) do
+		expanded[pid] = (pid == Config.activeProvider)
+	end
+	local function rebuild()
+		for _, c in ipairs(scroll:GetChildren()) do
+			if c:IsA("GuiObject") then c:Destroy() end
+		end
+		for _, pid in ipairs(providerOrder()) do
+			local p = Config.providers[pid]
+			local isActive = pid == Config.activeProvider
+			local head = new("TextButton", {
+				Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = isActive and T.input or T.secondary,
+				BorderSizePixel = 0, AutoButtonColor = false, Font = FONT_BOLD, TextSize = 13,
+				TextColor3 = isActive and T.accentHover or T.text, Text = (expanded[pid] and "▾ " or "▸ ") .. p.name,
+				TextXAlignment = Enum.TextXAlignment.Left, ZIndex = Z.popup + 2, Parent = scroll,
+			})
+			corner(head, 8)
+			pad(head, 10, 0, 10, 0)
+			head.Activated:Connect(function()
+				expanded[pid] = not expanded[pid]
+				rebuild()
+			end)
+			if expanded[pid] then
+				local holder = new("Frame", {
+					Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+					BackgroundTransparency = 1, ZIndex = Z.popup + 2, Parent = scroll,
+				})
+				local inner = vlist(holder, 2)
+				pad(holder, 10, 2, 2, 2)
+				buildModelList(holder, pid, function(modelId)
+					selectModel(pid, modelId)
+					closePopup()
+				end)
+			end
+		end
+	end
+	rebuild()
+end)
+
+----------------------------------------------------------------------------------------------------
+-- 23. SETTINGS MODAL (centered, dark backdrop, ABOF close)
+----------------------------------------------------------------------------------------------------
+local modalLayer = new("Frame", {
+	Name = "ModalLayer", Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+	Visible = false, Active = false, ZIndex = Z.backdrop, Parent = screenGui,
+})
+local backdrop = new("Frame", {
+	Name = "Backdrop", Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = Color3.new(0, 0, 0),
+	BackgroundTransparency = 1, BorderSizePixel = 0, Active = true, ZIndex = Z.backdrop,
+	Parent = modalLayer,
+})
+local settingsPanel = new("CanvasGroup", {
+	Name = "SettingsPanel", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 0),
+	Size = UDim2.new(0, 720, 0, 560), BackgroundColor3 = T.surface, GroupTransparency = 1,
+	ZIndex = Z.modal, Parent = modalLayer,
+})
+corner(settingsPanel, 16)
+stroke(settingsPanel, T.border, 0.3)
+local modalConstraint = new("UISizeConstraint", {
+	MinSize = Vector2.new(340, 300), MaxSize = Vector2.new(760, 620), Parent = settingsPanel,
+})
+
+local modalHeader = new("Frame", {
+	Size = UDim2.new(1, 0, 0, 56), BackgroundColor3 = T.surface, BorderSizePixel = 0,
+	ZIndex = Z.modal + 1, Parent = settingsPanel,
+})
+pad(modalHeader, 20, 0, 20, 0)
+local modalTitle = new("TextLabel", {
+	Size = UDim2.new(1, -60, 1, 0), BackgroundTransparency = 1, Font = FONT_BOLD, TextSize = 17,
+	TextColor3 = T.text, Text = "Settings", TextXAlignment = Enum.TextXAlignment.Left,
+	ZIndex = Z.modal + 2, Parent = modalHeader,
+})
+-- ABOF: the only control that closes Settings.
+local modalClose = new("ImageButton", {
+	Name = "CloseSettings", Size = UDim2.new(0, 30, 0, 30), AnchorPoint = Vector2.new(1, 0.5),
+	Position = UDim2.new(1, 0, 0.5, 0), BackgroundColor3 = T.secondary, BorderSizePixel = 0,
+	AutoButtonColor = false, Image = ICONS.close, ImageColor3 = T.textSub, ScaleType = Enum.ScaleType.Fit,
+	ZIndex = Z.modal + 3, Parent = modalHeader,
+})
+corner(modalClose, 8)
+modalClose.MouseEnter:Connect(function() tw(modalClose, 0.12, { BackgroundColor3 = T.hover, ImageColor3 = T.text }) end)
+modalClose.MouseLeave:Connect(function() tw(modalClose, 0.12, { BackgroundColor3 = T.secondary, ImageColor3 = T.textSub }) end)
+
+local tabsScroll = new("ScrollingFrame", {
+	Name = "CategoryTabs", Size = UDim2.new(1, -40, 0, 40), Position = UDim2.new(0, 20, 0, 66),
+	BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 0,
+	ScrollingDirection = Enum.ScrollingDirection.X, AutomaticCanvasSize = Enum.AutomaticSize.X,
+	CanvasSize = UDim2.new(0, 0, 0, 0), ScrollingEnabled = true, ZIndex = Z.modal + 1, Parent = settingsPanel,
+})
+hlist(tabsScroll, 8)
+
+local contentHost = new("Frame", {
+	Name = "ContentHost", Size = UDim2.new(1, -40, 1, -134), Position = UDim2.new(0, 20, 0, 116),
+	BackgroundTransparency = 1, BorderSizePixel = 0, ClipsDescendants = true,
+	ZIndex = Z.modal + 1, Parent = settingsPanel,
+})
+
+local CATEGORIES = { "Settings", "Profile", "Providers" }
+local activeCategory = "Settings"
+local tabButtons: {[string]: any} = {}
+
+local function categoryContent(): any
+	local existing = contentHost:FindFirstChild("Content")
+	if existing then existing:Destroy() end
+	local scroll = new("ScrollingFrame", {
+		Name = "Content", Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0,
+		ScrollBarThickness = 5, ScrollBarImageColor3 = T.border, ScrollBarImageTransparency = 0.4,
+		ScrollingDirection = Enum.ScrollingDirection.Y, AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		CanvasSize = UDim2.new(0, 0, 0, 0), ZIndex = Z.modal + 2, Parent = contentHost,
+	})
+	vlist(scroll, 10)
+	pad(scroll, 2, 2, 8, 16)
+	return scroll
+end
+
+----------------------------------------------------------------------------------------------------
+-- 24. SETTINGS CATEGORY
+----------------------------------------------------------------------------------------------------
+local function buildSettingsTab()
+	local scroll = categoryContent()
+	zindex(scroll, Z.modal + 2)
+	local order = 0
+	local function nextOrder(): number
+		order += 1
+		return order
+	end
+
+	makeSectionTitle(scroll, "Custom system prompt", nextOrder())
+	makeCaption(scroll, "Stored locally. Only sent when a real provider request is actually made — it never affects a local preview.", nextOrder())
+	local promptBox = makeTextField(scroll, {
+		Size = UDim2.new(1, 0, 0, 96), multiLine = true, text = Config.systemPrompt,
+		placeholder = "You are Aethryon, a concise Roblox/Luau assistant…",
+	})
+	promptBox.LayoutOrder = nextOrder()
+	local promptRowFrame = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1, LayoutOrder = nextOrder(),
+		ZIndex = Z.modal + 2, Parent = scroll,
+	})
+	hlist(promptRowFrame, 8)
+	makeButton(promptRowFrame, "Save prompt", {
+		Size = UDim2.new(0, 130, 0, 34), bg = T.accent, textColor = T.bg, hover = T.accentHover,
+		onClick = function()
+			Config.systemPrompt = promptBox.Text
+			persist()
+			notify({ title = "System prompt saved", desc = Store.note, kind = "success", duration = 3 })
+		end,
+	})
+	makeButton(promptRowFrame, "Clear", {
+		Size = UDim2.new(0, 90, 0, 34),
+		onClick = function()
+			promptBox.Text = ""
+			Config.systemPrompt = ""
+			persist()
+			notify({ title = "System prompt cleared", desc = "The default behaviour is restored.", kind = "info", duration = 3 })
+		end,
+	})
+
+	makeSectionTitle(scroll, "Default generation settings", nextOrder())
+	makeCaption(scroll, "These defaults populate the composer's parameter panel.", nextOrder())
+
+	local maxTokensRow = makeRow(scroll, 62, { order = nextOrder() })
+	local mtTitle = new("TextLabel", {
+		Size = UDim2.new(0.5, 0, 0, 18), BackgroundTransparency = 1, Font = FONT_MED, TextSize = 13,
+		TextColor3 = T.text, Text = "Max Tokens", TextXAlignment = Enum.TextXAlignment.Left,
+		ZIndex = maxTokensRow.ZIndex + 1, Parent = maxTokensRow,
+	})
+	local mtBox = makeTextField(maxTokensRow, {
+		Size = UDim2.new(0, 120, 0, 32), text = tostring(Config.maxTokens), align = Enum.TextXAlignment.Center,
+	})
+	mtBox.Position = UDim2.new(1, 0, 0, 14)
+	mtBox.AnchorPoint = Vector2.new(1, 0)
+	mtBox.FocusLost:Connect(function()
+		local n = tonumber(mtBox.Text)
+		if n and n >= 1 and math.floor(n) == n then
+			Config.maxTokens = math.floor(math.clamp(n, 1, 1000000))
+			persist()
+		else
+			mtBox.Text = tostring(Config.maxTokens)
+			notify({ title = "Invalid value", desc = "Max Tokens must be a positive integer.", kind = "warn" })
+		end
+	end)
+
+	local tempSlider = makeSlider(scroll, {
+		label = "Temperature", min = 0, max = 1, value = Config.temperature, decimals = 2, step = 0.01,
+		order = nextOrder(),
+		onChange = function(v: number)
+			Config.temperature = v
+			persist()
+		end,
+	})
+
+	local spec = thinkingSpec(Config.activeProvider)
+	local thinkRow = makeRow(scroll, 76, { order = nextOrder() })
+	local thinkTitle = new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1, Font = FONT_MED, TextSize = 13,
+		TextColor3 = T.text, Text = "Thinking Level (" .. (Config.providers[Config.activeProvider].name) .. ")",
+		TextXAlignment = Enum.TextXAlignment.Left, ZIndex = thinkRow.ZIndex + 1, Parent = thinkRow,
+	})
+	local p = Config.providers[Config.activeProvider]
+	local options = {}
+	for _, l in ipairs(spec.levels) do
+		table.insert(options, { label = l.label, value = l.value, disabled = not spec.supported })
+	end
+	local thinkDropdown = makeDropdown(thinkRow, {
+		Size = UDim2.new(1, 0, 0, 32), selected = p.thinking, options = options,
+		onSelect = function(o: any)
+			p.thinking = o.label
+			persist()
+		end,
+	})
+	thinkDropdown.btn = thinkRow:FindFirstChildOfClass("TextButton")
+	makeCaption(scroll, spec.note, nextOrder())
+
+	makeSectionTitle(scroll, "Interface preferences", nextOrder())
+	makeToggle(scroll, "Enable animations", "Toggles UI transitions such as sidebar collapse and modals.",
+		ANIM.enabled, function(v: boolean)
+			ANIM.enabled = v
+			Config.ui.animate = v
+			persist()
+		end, nextOrder())
+	makeToggle(scroll, "Start with the sidebar collapsed", "Default sidebar state when Aethryon AI opens.",
+		Config.ui.sidebarCollapsed, function(v: boolean)
+			Config.ui.sidebarCollapsed = v
+			persist()
+		end, nextOrder())
+
+	local dangerRow = new("Frame", { Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1, LayoutOrder = nextOrder(), ZIndex = Z.modal + 2, Parent = scroll })
+	hlist(dangerRow, 8)
+	makeButton(dangerRow, "Clear this conversation", {
+		Size = UDim2.new(0, 176, 0, 34), onClick = function()
+			confirmDialog("Clear this conversation?", "All messages in the current chat will be removed from local storage.",
+				function()
+					local c = activeConversation()
+					if c then c.messages = {} end
+					persist()
+					renderConversation()
+					notify({ title = "Conversation cleared", desc = "Local messages removed.", kind = "success", duration = 3 })
+				end)
+		end,
+	})
+	makeButton(dangerRow, "Clear all history", {
+		Size = UDim2.new(0, 150, 0, 34), onClick = function()
+			confirmDialog("Clear all local history?", "Every saved conversation will be removed. This cannot be undone.",
+				function()
+					Config.conversations = {}
+					Config.activeId = nil
+					ensureConversation()
+					persist()
+					renderConversation()
+					notify({ title = "History cleared", desc = "All local conversations removed.", kind = "success", duration = 3 })
+				end)
+		end,
+	})
+	makeButton(scroll, "Restore default UI preferences", {
+		Size = UDim2.new(1, 0, 0, 36), order = 0, onClick = function()
+			Config.ui.animate = true
+			Config.ui.sidebarCollapsed = false
+			ANIM.enabled = true
+			persist()
+			setSidebarCollapsed(false)
+			notify({ title = "Preferences restored", desc = "UI defaults have been restored.", kind = "success", duration = 3 })
+			buildSettingsTab()
+		end,
+	}).LayoutOrder = nextOrder()
+	makeCaption(scroll, "Storage: " .. Store.note, nextOrder())
+end
+
+----------------------------------------------------------------------------------------------------
+-- 25. PROFILE CATEGORY
+----------------------------------------------------------------------------------------------------
+local function buildProfileTab()
+	local scroll = categoryContent()
+	zindex(scroll, Z.modal + 2)
+	local order = 0
+	local function nextOrder(): number
+		order += 1
+		return order
+	end
+
+	makeSectionTitle(scroll, "What should Aethryon call you?", nextOrder())
+	makeCaption(scroll, "Used in greetings. Stored locally; clearing it returns to the default behaviour.", nextOrder())
+	local nameBox = makeTextField(scroll, {
+		Size = UDim2.new(1, 0, 0, 36), text = Config.displayName,
+		placeholder = "Leave empty to use your Roblox display name",
+	})
+	nameBox.LayoutOrder = nextOrder()
+	local nameRow = new("Frame", { Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1, LayoutOrder = nextOrder(), ZIndex = Z.modal + 2, Parent = scroll })
+	hlist(nameRow, 8)
+	makeButton(nameRow, "Apply", {
+		Size = UDim2.new(0, 110, 0, 34), bg = T.accent, textColor = T.bg, hover = T.accentHover,
+		onClick = function()
+			local value = (nameBox.Text or "")
+			if #value > 40 then
+				notify({ title = "Name too long", desc = "Please use 40 characters or fewer.", kind = "warn" })
+				return
+			end
+			Config.displayName = value
+			persist()
+			updateProfileCard()
+			notify({ title = "Display name updated", desc = #value > 0 and ("Aethryon will call you “" .. value .. "”.") or "Reverted to your Roblox display name.", kind = "success", duration = 3 })
+		end,
+	})
+	makeButton(nameRow, "Clear", {
+		Size = UDim2.new(0, 90, 0, 34), onClick = function()
+			nameBox.Text = ""
+			Config.displayName = ""
+			persist()
+			updateProfileCard()
+			notify({ title = "Display name cleared", desc = "Roblox display name will be used instead.", kind = "info", duration = 3 })
+		end,
+	})
+
+	makeSectionTitle(scroll, "Player information", nextOrder())
+	makeCaption(scroll, "Read-only Roblox account data. Aethryon cannot change your Roblox account.", nextOrder())
+
+	local infoCard = makeRow(scroll, 96, { order = nextOrder() })
+	local av = new("ImageLabel", {
+		Size = UDim2.new(0, 72, 0, 72), Position = UDim2.new(0, 0, 0.5, 0), AnchorPoint = Vector2.new(0, 0.5),
+		BackgroundColor3 = T.input, BorderSizePixel = 0, Image = "", ScaleType = Enum.ScaleType.Crop,
+		ZIndex = infoCard.ZIndex + 1, Parent = infoCard,
+	})
+	corner(av, 36)
+	stroke(av, T.border, 0.4)
+	local infoList = new("Frame", {
+		Size = UDim2.new(1, -92, 1, 0), Position = UDim2.new(0, 88, 0, 0), BackgroundTransparency = 1,
+		ZIndex = infoCard.ZIndex + 1, Parent = infoCard,
+	})
+	vlist(infoList, 6, Enum.VerticalAlignment.Center)
+	local function infoLine(text: string, color: Color3?)
+		return new("TextLabel", {
+			Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1, Font = FONT, TextSize = 13,
+			TextColor3 = color or T.textSub, Text = text, TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = infoCard.ZIndex + 2, Parent = infoList,
+		})
+	end
+	infoLine("Roblox display name: " .. tostring(LocalPlayer.DisplayName), T.text)
+	infoLine("Roblox username: @" .. tostring(LocalPlayer.Name), T.text)
+	infoLine("Preferred Aethryon name: " .. (Config.displayName ~= "" and Config.displayName or "(default)"), T.accentHover)
+
+	-- Safe avatar fetch with graceful fallback.
+	task.spawn(function()
+		local ok, content = pcall(function()
+			return Players:GetUserThumbnailAsync(LocalPlayer.UserId, Enum.ThumbnailType.AvatarBust, Enum.ThumbnailSize.Size420x420)
+		end)
+		if ok and typeof(content) == "string" then
+			av.Image = content
+			avatar.Image = content
+		else
+			av.Image = ""
+			avatar.Image = ""
+		end
+	end)
+end
+
+----------------------------------------------------------------------------------------------------
+-- 26. PROVIDERS CATEGORY
+----------------------------------------------------------------------------------------------------
+local function buildProvidersTab()
+	local scroll = categoryContent()
+	zindex(scroll, Z.modal + 2)
+	local order = 0
+	local function nextOrder(): number
+		order += 1
+		return order
+	end
+
+	makeCaption(scroll,
+		"<b>Security notice:</b> a Roblox LocalScript runs on the client. Anything you type here (including API keys) "
+		.. "is visible to the client and is never a secure secret store. Keys are kept in memory only and are never written to "
+		.. "saved configuration, logs, notifications or chat history. Production integrations must proxy requests through a secure server.",
+		nextOrder())
+
+	local function providerCard(pid: string)
+		local p = Config.providers[pid]
+		local card = makeRow(scroll, 0, { order = nextOrder(), auto = true })
+		local cardList = vlist(card, 10)
+		local head = new("Frame", { Size = UDim2.new(1, 0, 0, 42), BackgroundTransparency = 1, LayoutOrder = 1, ZIndex = card.ZIndex + 1, Parent = card })
+		hlist(head, 10)
+		local mark = new("TextLabel", {
+			Size = UDim2.new(0, 38, 0, 38), BackgroundColor3 = T.input, BorderSizePixel = 0,
+			Font = FONT_BOLD, TextSize = 14, TextColor3 = T.accent, Text = p.mark,
+			ZIndex = card.ZIndex + 2, Parent = head,
+		})
+		corner(mark, 10)
+		stroke(mark, T.border, 0.4)
+		local nameCol = new("Frame", { Size = UDim2.new(1, -140, 1, 0), BackgroundTransparency = 1, LayoutOrder = 2, ZIndex = card.ZIndex + 2, Parent = head })
+		vlist(nameCol, 2, Enum.VerticalAlignment.Center)
+		new("TextLabel", {
+			Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1, Font = FONT_BOLD, TextSize = 14,
+			TextColor3 = T.text, Text = p.name, TextXAlignment = Enum.TextXAlignment.Left,
+			ZIndex = card.ZIndex + 3, Parent = nameCol,
+		})
+		local statusLabel = new("TextLabel", {
+			Name = "Status", Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1, Font = FONT,
+			TextSize = 11, TextColor3 = T.textMuted, Text = "", TextXAlignment = Enum.TextXAlignment.Left,
+			ZIndex = card.ZIndex + 3, Parent = nameCol,
+		})
+		local selectBtn = new("TextButton", {
+			Size = UDim2.new(0, 92, 0, 30), BackgroundColor3 = T.input, BorderSizePixel = 0,
+			AutoButtonColor = false, Font = FONT_MED, TextSize = 12, TextColor3 = T.textSub,
+			Text = "Select", ZIndex = card.ZIndex + 2, Parent = head,
+		})
+		corner(selectBtn, 8)
+
+		local function refreshStatus()
+			local isActive = Config.activeProvider == pid
+			selectBtn.Text = isActive and "Selected" or "Select"
+			selectBtn.TextColor3 = isActive and T.accentHover or T.textSub
+			stroke(card, isActive and T.accent or T.border, isActive and 0.15 or 0.45)
+			local state
+			if p.apiKey == "" then
+				state = "Not configured — no key entered"
+			elseif #p.models == 0 then
+				state = "Key entered — models not fetched"
+			elseif p.model == "" then
+				state = "Key entered, " .. #p.models .. " models fetched — no model selected"
+			else
+				state = "Configured — key entered, model " .. p.model
+			end
+			statusLabel.Text = state
+			statusLabel.TextColor3 = (p.apiKey == "") and T.textMuted or T.warn
+		end
+
+		selectBtn.Activated:Connect(function()
+			Config.activeProvider = pid
+			persist()
+			refreshProviderButton()
+			buildProvidersTab()
+			notify({ title = "Provider selected", desc = p.name .. " is now active.", kind = "info", duration = 3 })
+		end)
+
+		makeCaption(card, "Base URL", 2)
+		local urlBox = makeTextField(card, { Size = UDim2.new(1, 0, 0, 34), text = p.baseUrl, placeholder = "https://…" })
+		urlBox.LayoutOrder = 3
+		urlBox.FocusLost:Connect(function()
+			local v = urlBox.Text
+			if v:match("^https?://") then
+				p.baseUrl = trimSlash(v)
+				urlBox.Text = p.baseUrl
+				persist()
+			else
+				urlBox.Text = p.baseUrl
+				notify({ title = "Invalid URL", desc = "Base URL must start with http:// or https://", kind = "warn" })
+			end
+		end)
+
+		makeCaption(card, "Selected Model", 4)
+		local modelBtn = new("TextButton", {
+			Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = T.input, BorderSizePixel = 0,
+			AutoButtonColor = false, Font = FONT_MED, TextSize = 13, TextColor3 = T.text,
+			Text = (p.model ~= "" and p.model) or "No model selected", TextXAlignment = Enum.TextXAlignment.Left,
+			LayoutOrder = 5, ZIndex = card.ZIndex + 2, Parent = card,
+		})
+		corner(modelBtn, 8)
+		stroke(modelBtn, T.border, 0.4)
+		pad(modelBtn, 10, 0, 26, 0)
+		modelBtn.Activated:Connect(function()
+			if #p.models == 0 then
+				notify({ title = "No models yet", desc = "Press “Fetch AI Models” to retrieve the model list from " .. p.name .. ".", kind = "warn" })
+				return
+			end
+			local panel, sc = makePopup(modelBtn, 280, 260)
+			panel:SetAttribute("Owner", tostring(modelBtn))
+			buildModelList(sc, pid, function(modelId)
+				selectModel(pid, modelId)
+				modelBtn.Text = modelId
+				refreshStatus()
+				closePopup()
+			end)
+		end)
+
+		makeCaption(card, "Fetch AI Models", 6)
+		local fetchRow = new("Frame", { Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1, LayoutOrder = 7, ZIndex = card.ZIndex + 1, Parent = card })
+		hlist(fetchRow, 8)
+		local fetchBtn = makeButton(fetchRow, "Fetch AI Models", { Size = UDim2.new(0, 150, 0, 34), bg = T.accent, textColor = T.bg, hover = T.accentHover })
+		local fetchState = new("TextLabel", {
+			Size = UDim2.new(1, -162, 1, 0), BackgroundTransparency = 1, Font = FONT, TextSize = 11,
+			TextColor3 = T.textMuted, Text = #p.models .. " model(s) in list",
+			TextXAlignment = Enum.TextXAlignment.Left, ZIndex = card.ZIndex + 2, Parent = fetchRow,
+		})
+		local fetching = false
+		fetchBtn.Activated:Connect(function()
+			if fetching then return end
+			if p.apiKey == "" then
+				notify({ title = "API key required", desc = "Enter an API key for " .. p.name .. " before fetching models.", kind = "warn" })
+				return
+			end
+			fetching = true
+			fetchBtn.Text = "Fetching…"
+			fetchState.Text = "Contacting " .. p.name .. "…"
+			task.spawn(function()
+				local impl = Providers[pid]
+				local ok, models, err = false, nil, "Unsupported provider."
+				if impl then ok, models, err = impl.listModels(p) end
+				if ok and typeof(models) == "table" and #models > 0 then
+					p.models = models
+					persist()
+					fetchState.Text = #models .. " model(s) fetched"
+					modelBtn.Text = (p.model ~= "" and p.model) or "No model selected"
+					refreshStatus()
+					notify({ title = p.name .. " models fetched", desc = #models .. " model identifiers retrieved from the provider API.", kind = "success" })
+				else
+					fetchState.Text = "Fetch failed"
+					notify({
+						title = "Fetch failed",
+						desc = (typeof(err) == "string" and err ~= "" and sanitize(err)) or "No models were returned.",
+						kind = "error",
+					})
+				end
+				fetching = false
+				fetchBtn.Text = "Fetch AI Models"
+			end)
+		end)
+
+		makeCaption(card, "API Key", 8)
+		local keyRow = new("Frame", { Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1, LayoutOrder = 9, ZIndex = card.ZIndex + 1, Parent = card })
+		hlist(keyRow, 8)
+		local keyDisplay = new("TextLabel", {
+			Size = UDim2.new(1, -178, 1, 0), BackgroundColor3 = T.input, BorderSizePixel = 0,
+			Font = FONT_CODE, TextSize = 14, TextColor3 = T.textSub,
+			Text = (p.apiKey ~= "" and "••••••") or "No key set", TextXAlignment = Enum.TextXAlignment.Left,
+			ZIndex = card.ZIndex + 2, Parent = keyRow,
+		})
+		corner(keyDisplay, 8)
+		stroke(keyDisplay, T.border, 0.4)
+		pad(keyDisplay, 10, 0, 10, 0)
+		local keyEdit = makeButton(keyRow, "Set key", { Size = UDim2.new(0, 84, 0, 34) })
+		local keyClear = makeButton(keyRow, "Clear", { Size = UDim2.new(0, 78, 0, 34) })
+		local editing = false
+		local keyBox: any = nil
+		keyEdit.Activated:Connect(function()
+			if not editing then
+				editing = true
+				keyDisplay.Visible = false
+				keyBox = makeTextField(keyRow, { Size = UDim2.new(1, -178, 1, 0), text = "", placeholder = "Paste key (never stored to disk)" })
+				keyBox.LayoutOrder = 0
+				keyBox:CaptureFocus()
+				keyEdit.Text = "Save"
+				keyBox.FocusLost:Connect(function(enterPressed)
+					if not editing then return end
+					editing = false
+					local v = keyBox.Text or ""
+					if v ~= "" then
+						p.apiKey = v
+						keyDisplay.Text = "••••••"
+					else
+						keyDisplay.Text = p.apiKey ~= "" and "••••••" or "No key set"
+					end
+					if keyBox and keyBox.Parent then keyBox:Destroy() end
+					keyBox = nil
+					keyDisplay.Visible = true
+					keyEdit.Text = "Set key"
+					refreshStatus()
+				end)
+			else
+				if keyBox then keyBox:CaptureFocus() end
+			end
+		end)
+		keyClear.Activated:Connect(function()
+			p.apiKey = ""
+			keyDisplay.Text = "No key set"
+			if keyBox and keyBox.Parent then keyBox:Destroy() end
+			keyBox = nil
+			editing = false
+			keyEdit.Text = "Set key"
+			keyDisplay.Visible = true
+			refreshStatus()
+			notify({ title = "Key cleared", desc = p.name .. " key removed from memory.", kind = "info", duration = 3 })
+		end)
+
+		makeCaption(card, "Keys stay in memory for this session only and are never written to saved configuration.", 10)
+		refreshStatus()
+		return card
+	end
+
+	for _, pid in ipairs(providerOrder()) do
+		providerCard(pid)
+	end
+
+	makeButton(scroll, "Add Provider", {
+		Size = UDim2.new(1, 0, 0, 38), LayoutOrder = 99,
+		onClick = function()
+			notify({
+				title = "Work in progress",
+				desc = "🚧 Feature is still Work In Progress! 🚧",
+				kind = "warn",
+			})
+		end,
+	})
+	makeCaption(scroll, "Storage: " .. Store.note, 100)
+end
+
+----------------------------------------------------------------------------------------------------
+-- 27. CONFIRMATION DIALOG (explicit close/actions only)
+----------------------------------------------------------------------------------------------------
+local confirmFrame: any = nil
+function confirmDialog(title: string, desc: string, onConfirm: any)
+	if confirmFrame and confirmFrame.Parent then confirmFrame:Destroy() end
+	confirmFrame = new("CanvasGroup", {
+		Name = "Confirm", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 0),
+		Size = UDim2.new(0, 380, 0, 190), BackgroundColor3 = T.surface, GroupTransparency = 1,
+		ZIndex = Z.confirm, Parent = modalLayer,
+	})
+	corner(confirmFrame, 14)
+	stroke(confirmFrame, T.border, 0.25)
+	pad(confirmFrame, 18, 16, 18, 16)
+	vlist(confirmFrame, 10)
+	new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1, Font = FONT_BOLD, TextSize = 16,
+		TextColor3 = T.text, Text = title, TextXAlignment = Enum.TextXAlignment.Left,
+		ZIndex = Z.confirm + 1, Parent = confirmFrame,
+	})
+	new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+		Font = FONT, TextSize = 13, TextColor3 = T.textSub, Text = desc, TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+		ZIndex = Z.confirm + 1, Parent = confirmFrame,
+	})
+	local btnRow = new("Frame", { Size = UDim2.new(1, 0, 0, 36), BackgroundTransparency = 1, ZIndex = Z.confirm + 1, Parent = confirmFrame })
+	hlist(btnRow, 10, Enum.HorizontalAlignment.Right)
+	makeButton(btnRow, "Cancel", {
+		Size = UDim2.new(0, 100, 0, 36), onClick = function()
+			local f = confirmFrame
+			confirmFrame = nil
+			tw(f, 0.18, { GroupTransparency = 1 })
+			task.delay(0.2, function() if f.Parent then f:Destroy() end end)
+		end,
+	})
+	makeButton(btnRow, "Confirm", {
+		Size = UDim2.new(0, 110, 0, 36), bg = T.error, textColor = T.text, hover = T.warn,
+		onClick = function()
+			local f = confirmFrame
+			confirmFrame = nil
+			tw(f, 0.18, { GroupTransparency = 1 })
+			task.delay(0.2, function() if f.Parent then f:Destroy() end end)
+			if onConfirm then onConfirm() end
+		end,
+	})
+	tw(confirmFrame, 0.2, { GroupTransparency = 0 })
+end
+
+----------------------------------------------------------------------------------------------------
+-- 28. MODAL OPEN/CLOSE (ABOF)
+----------------------------------------------------------------------------------------------------
+local modalOpen = false
+local function buildCategory(name: string)
+	activeCategory = name
+	modalTitle.Text = name
+	for cat, btn in pairs(tabButtons) do
+		local on = cat == name
+		tw(btn, 0.16, { BackgroundColor3 = on and T.input or T.secondary, TextColor3 = on and T.accentHover or T.textSub })
+	end
+	if name == "Settings" then
+		buildSettingsTab()
+	elseif name == "Profile" then
+		buildProfileTab()
+	else
+		buildProvidersTab()
+	end
+end
+
+for _, cat in ipairs(CATEGORIES) do
+	local btn = new("TextButton", {
+		Size = UDim2.new(0, 132, 0, 36), BackgroundColor3 = T.secondary, BorderSizePixel = 0,
+		AutoButtonColor = false, Font = FONT_MED, TextSize = 13, TextColor3 = T.textSub, Text = cat,
+		ZIndex = Z.modal + 2, Parent = tabsScroll,
+	})
+	corner(btn, 10)
+	stroke(btn, T.border, 0.4)
+	btn.Activated:Connect(function() buildCategory(cat) end)
+	tabButtons[cat] = btn
+end
+
+function openSettings(category: string?)
+	modalOpen = true
+	modalLayer.Visible = true
+	tw(backdrop, 0.22, { BackgroundTransparency = 0.55 })
+	tw(settingsPanel, 0.26, { GroupTransparency = 0 })
+	buildCategory(category or activeCategory)
+end
+
+local function closeSettings()
+	if not modalOpen then return end
+	modalOpen = false
+	closePopup()
+	if confirmFrame and confirmFrame.Parent then confirmFrame:Destroy() end
+	tw(backdrop, 0.22, { BackgroundTransparency = 1 })
+	tw(settingsPanel, 0.22, { GroupTransparency = 1 })
+	task.delay(0.26, function()
+		if not modalOpen then modalLayer.Visible = false end
+	end)
+end
+modalClose.Activated:Connect(closeSettings) -- the assigned close button
+
+----------------------------------------------------------------------------------------------------
+-- 29. PARAMETER PANEL ("+" BUTTON)
+----------------------------------------------------------------------------------------------------
+local paramPanel = new("CanvasGroup", {
+	Name = "ParamPanel", AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 0, 0, -8),
+	Size = UDim2.new(0, 320, 0, 0), BackgroundColor3 = T.secondary, GroupTransparency = 1,
+	Visible = false, ZIndex = Z.composer + 20, Parent = composerHolder,
+})
+corner(paramPanel, 12)
+stroke(paramPanel, T.border, 0.25)
+local paramList = vlist(paramPanel, 8)
+pad(paramPanel, 12, 12, 12, 12)
+local paramAuto = new("UISizeConstraint", { MinSize = Vector2.new(260, 0), MaxSize = Vector2.new(420, 420), Parent = paramPanel })
+paramPanel.AutomaticSize = Enum.AutomaticSize.Y
+
+local paramsBuilt = false
+local paramRefresh: any = nil
+local function buildParamPanel()
+	for _, c in ipairs(paramPanel:GetChildren()) do
+		if c:IsA("GuiObject") then c:Destroy() end
+	end
+	local order = 0
+	local function nextOrder(): number
+		order += 1
+		return order
+	end
+
+	makeSectionTitle(paramPanel, "Generation parameters", nextOrder())
+	makeCaption(paramPanel, "Applied to the next request sent to the active provider.", nextOrder())
+
+	-- Max Tokens
+	local mtRow = makeRow(paramPanel, 58, { order = nextOrder() })
+	local mtTitle = new("TextLabel", {
+		Size = UDim2.new(0.5, 0, 0, 18), BackgroundTransparency = 1, Font = FONT_MED, TextSize = 12,
+		TextColor3 = T.text, Text = "Max Tokens", TextXAlignment = Enum.TextXAlignment.Left,
+		ZIndex = mtRow.ZIndex + 1, Parent = mtRow,
+	})
+	local mtBox = makeTextField(mtRow, { Size = UDim2.new(0, 110, 0, 30), text = tostring(Config.maxTokens), align = Enum.TextXAlignment.Center })
+	mtBox.Position = UDim2.new(1, 0, 1, -30)
+	mtBox.AnchorPoint = Vector2.new(0, 0)
+	mtBox.FocusLost:Connect(function()
+		local n = tonumber(mtBox.Text)
+		if n and n >= 1 and math.floor(n) == n then
+			Config.maxTokens = math.floor(math.clamp(n, 1, 1000000))
+			persist()
+		else
+			mtBox.Text = tostring(Config.maxTokens)
+			notify({ title = "Invalid value", desc = "Max Tokens must be a positive integer.", kind = "warn" })
+		end
+	end)
+
+	-- Temperature
+	local tempSlider = makeSlider(paramPanel, {
+		label = "Temperature", min = 0, max = 1, value = Config.temperature, decimals = 2, step = 0.01,
+		order = nextOrder(), onChange = function(v: number)
+			Config.temperature = v
+			persist()
+		end,
+	})
+	makeCaption(paramPanel, "Controls response variability: lower values are more deterministic.", nextOrder())
+
+	-- Thinking level
+	local p = Config.providers[Config.activeProvider]
+	local spec, chosen = resolveThinking(Config.activeProvider)
+	local thinkRow = makeRow(paramPanel, 74, { order = nextOrder() })
+	local thinkTitle = new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1, Font = FONT_MED, TextSize = 12,
+		TextColor3 = spec.supported and T.text or T.textMuted,
+		Text = "Thinking Level — " .. p.name,
+		TextXAlignment = Enum.TextXAlignment.Left, ZIndex = thinkRow.ZIndex + 1, Parent = thinkRow,
+	})
+	local options = {}
+	for _, l in ipairs(spec.levels) do
+		table.insert(options, { label = l.label, value = l.value, disabled = not spec.supported })
+	end
+	local thinkDropdown = makeDropdown(thinkRow, {
+		Size = UDim2.new(1, 0, 0, 32), Position = UDim2.new(0, 0, 0, 34), selected = chosen.label,
+		options = options, popupWidth = 280,
+		onSelect = function(o: any)
+			p.thinking = o.label
+			persist()
+		end,
+	})
+	for _, c in ipairs(thinkRow:GetChildren()) do
+		if c:IsA("TextButton") then c.Position = UDim2.new(0, 0, 0, 34) end
+	end
+	local thinkNote = makeCaption(paramPanel, spec.note, nextOrder())
+
+	paramRefresh = function()
+		buildParamPanel()
+	end
+	paramsBuilt = true
+end
+
+local paramOpen = false
+local function setParamPanel(open: boolean)
+	paramOpen = open
+	if open and not paramsBuilt then buildParamPanel() end
+	if open then
+		buildParamPanel()
+		paramPanel.Visible = true
+		tw(paramPanel, 0.18, { GroupTransparency = 0 })
+	else
+		tw(paramPanel, 0.16, { GroupTransparency = 1 })
+		task.delay(0.18, function() if not paramOpen then paramPanel.Visible = false end end)
+	end
+end
+plusButton.Activated:Connect(function() setParamPanel(not paramOpen) end)
+plusButton.MouseEnter:Connect(function() tw(plusButton, 0.12, { BackgroundColor3 = T.hover, TextColor3 = T.accentHover }) end)
+plusButton.MouseLeave:Connect(function() tw(plusButton, 0.12, { BackgroundColor3 = T.secondary, TextColor3 = T.textSub }) end)
+
+----------------------------------------------------------------------------------------------------
+-- 30. COMPOSER BEHAVIOUR
+----------------------------------------------------------------------------------------------------
+local function layoutForComposer(height: number)
+	composerHolder.Size = UDim2.new(1, 0, 0, height)
+	chatBody.Size = UDim2.new(1, 0, 1, -58 - height - 28)
+	tw(feed, 0.16, { Size = UDim2.new(1, 0, 1, 0) })
+	feed.Size = UDim2.new(1, 0, 1, 0)
+	requestFade()
+end
+
+local function recomposeHeight()
+	local w = math.max(input.AbsoluteSize.X, 60)
+	local text = input.Text
+	if text == "" then text = " " end
+	local size = TextService:GetTextSize(text, 15, FONT, Vector2.new(w, 100000))
+	local want = math.clamp(size.Y + 26, COMPOSER_MIN, COMPOSER_MAX)
+	if math.abs(want - composerH) > 1 then
+		composerH = want
+		tw(composerHolder, 0.16, { Size = UDim2.new(1, 0, 0, composerH) })
+		tw(chatBody, 0.16, { Size = UDim2.new(1, 0, 1, -58 - composerH - 28) })
+	end
+	input.Scrollable = (size.Y + 6) > (composerH - 16)
+	requestFade()
+end
+
+input:GetPropertyChangedSignal("Text"):Connect(recomposeHeight)
+input:GetPropertyChangedSignal("AbsoluteSize"):Connect(recomposeHeight)
+
+sendButton.Activated:Connect(sendCurrentMessage)
+sendButton.MouseEnter:Connect(function() tw(sendButton, 0.12, { BackgroundColor3 = T.hover, ImageColor3 = T.accentHover }) end)
+sendButton.MouseLeave:Connect(function() tw(sendButton, 0.12, { BackgroundColor3 = T.secondary, ImageColor3 = T.accent }) end)
+
+-- Enter sends, Shift+Enter inserts a newline.
+UserInputService.InputBegan:Connect(function(inputObj, gameProcessed)
+	if inputObj.UserInputType ~= Enum.UserInputType.Keyboard then return end
+	if inputObj.KeyCode ~= Enum.KeyCode.Return and inputObj.KeyCode ~= Enum.KeyCode.KeypadEnter then return end
+	if not input:IsFocused() then return end
+	local shiftDown = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+	if shiftDown then
+		-- Native MultiLine behaviour already inserts the newline; keep the caret at the end.
+		return
+	end
+	sendCurrentMessage()
+end)
+
+----------------------------------------------------------------------------------------------------
+-- 31. WINDOW LAYOUT / TOGGLE
+----------------------------------------------------------------------------------------------------
+local function layoutWindow()
+	local vp = screenGui.AbsoluteSize
+	if vp.X <= 0 or vp.Y <= 0 then
+		vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
+	end
+	local w = math.clamp(vp.X - 72, 420, 1180)
+	local h = math.clamp(vp.Y - 80, 320, 760)
+	mainWindow.Size = UDim2.new(0, w, 0, h)
+	shadow.Size = UDim2.new(0, w + 46, 0, h + 46)
+	settingsPanel.Size = UDim2.new(0, math.clamp(w - 120, 340, 720), 0, math.clamp(h - 90, 300, 560))
+	local vpx = vp.X
+	if vpx < 640 then
+		if not sidebarCollapsed then setSidebarCollapsed(true) end
+		providerButton.Size = UDim2.new(0, 190, 0, 38)
+	else
+		providerButton.Size = UDim2.new(0, 236, 0, 38)
+	end
+	notifLayer.Size = UDim2.new(0, math.clamp(vp.X * 0.3, 240, 340), 0, 0)
+end
+
+screenGui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+	layoutWindow()
+	requestFade()
+end)
+if workspace.CurrentCamera then
+	workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(layoutWindow)
+end
+
+local windowVisible = true
+toggleButton.Activated:Connect(function()
+	windowVisible = not windowVisible
+	mainWindow.Visible = windowVisible
+	shadow.Visible = windowVisible
+	if not windowVisible then
+		if modalOpen then closeSettings() end
+		setParamPanel(false)
+		closePopup()
+	end
+	tw(toggleButton, 0.16, { BackgroundColor3 = windowVisible and T.surface or T.secondary })
+end)
+toggleButton.MouseEnter:Connect(function() tw(toggleButton, 0.14, { BackgroundColor3 = T.hover }) end)
+toggleButton.MouseLeave:Connect(function() tw(toggleButton, 0.14, { BackgroundColor3 = windowVisible and T.surface or T.secondary }) end)
+
+-- Optional: drag the floating button so it never obstructs Roblox's own controls.
+do
+	local dragging, dragStart, startPos = false, nil, nil
+	toggleButton.InputBegan:Connect(function(inputObj)
+		if inputObj.UserInputType == Enum.UserInputType.MouseButton1 or inputObj.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = inputObj.Position
+			startPos = toggleButton.Position
+			inputObj.Changed:Connect(function()
+				if inputObj.UserInputState == Enum.UserInputState.End then dragging = false end
+			end)
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(inputObj)
+		if dragging and startPos and dragStart then
+			if inputObj.UserInputType == Enum.UserInputType.MouseMovement or inputObj.UserInputType == Enum.UserInputType.Touch then
+				local delta = inputObj.Position - dragStart
+				toggleButton.Position = UDim2.new(
+					startPos.X.Scale, startPos.X.Offset + delta.X,
+					startPos.Y.Scale, startPos.Y.Offset + delta.Y
+				)
+			end
+		end
+	end)
+end
+
+-- Clicking anywhere closes lightweight popups (never the Settings modal).
+UserInputService.InputBegan:Connect(function(inputObj)
+	if inputObj.UserInputType ~= Enum.UserInputType.MouseButton1 and inputObj.UserInputType ~= Enum.UserInputType.Touch then return end
+	if not openPopup then return end
+	local pos = inputObj.Position
+	local p = openPopup.AbsolutePosition
+	local s = openPopup.AbsoluteSize
+	local inside = pos.X >= p.X and pos.X <= p.X + s.X and pos.Y >= p.Y and pos.Y <= p.Y + s.Y
+	if not inside then closePopup() end
+end)
+
+----------------------------------------------------------------------------------------------------
+-- 32. PROFILE CARD UPDATE
+----------------------------------------------------------------------------------------------------
+function updateProfileCard()
+	local preferred = Config.displayName
+	local display = (preferred ~= nil and preferred ~= "") and preferred or LocalPlayer.DisplayName
+	profileName.Text = display
+	profileSub.Text = "@" .. LocalPlayer.Name
+end
+
+----------------------------------------------------------------------------------------------------
+-- 33. INITIALISATION
+----------------------------------------------------------------------------------------------------
+detectStore()
+local loaded = loadConfig()
+ANIM.enabled = Config.ui.animate
+
+-- Greeting (uses the preferred name when set).
+local function greetingFor(): string
+	if Config.displayName ~= "" then return Config.displayName end
+	return LocalPlayer.DisplayName
+end
+
+layoutWindow()
+setSidebarCollapsed(Config.ui.sidebarCollapsed == true)
+ensureConversation()
+updateProfileCard()
+refreshProviderButton()
+renderHistory()
+renderConversation()
+recomposeHeight()
+
+-- Welcome + User Information notifications (titles/descriptions from live LocalPlayer values).
+notify({
+	title = LocalPlayer.Name,
+	desc = "Thank you For using Aethryon AI!",
+	kind = "info",
+	duration = 6,
+})
+notify({
+	title = "User Information",
+	desc = "Executor: " .. EXECUTOR_NAME
+		.. "\nUsername: " .. LocalPlayer.Name
+		.. "\nDisplayName: " .. LocalPlayer.DisplayName,
+	kind = "info",
+	duration = 7,
+})
+notify({
+	title = "Storage",
+	desc = Store.note .. (loaded and " Previous configuration restored." or " Starting with default settings."),
+	kind = (Store.backend == "session") and "warn" or "info",
+	duration = 6,
+})
+
+task.defer(function()
+	scrollFeedToBottom()
+	updateFades()
+end)
+
+-- Keep the parameter panel in sync if the provider changes while it is open.
+local lastProvider = Config.activeProvider
+RunService.Heartbeat:Connect(function()
+	if Config.activeProvider ~= lastProvider then
+		lastProvider = Config.activeProvider
+		if paramOpen then buildParamPanel() end
+		refreshProviderButton()
+	end
+end)
+
+-- Persist on shutdown when a real backend exists.
+game:BindToClose(function()
+	if Store.backend ~= "session" then
+		local json = serializeConfig()
+		if json == "" then return end
+		if Store.backend == "localStorage" then
+			pcall(function() (game:GetService("LocalStorageService") :: any):SetItem(STORE_KEY, json) end)
+		else
+			local wf = execFn("writefile")
+			if wf then pcall(wf, "aethryon/config.json", json) end
+		end
+	end
+end)
