@@ -1,12 +1,16 @@
 --[[============================================================================
-    StudioGUI Creator v1.0 — WYSIWYG GUI Editor for Roblox
+    StudioGUI Creator v1.1 — WYSIWYG GUI Editor for Roblox
     Modeled after the Roblox Studio workflow.
 
     FEATURES
-    • Insert Panel (left)      — spawn ScreenGuis, Frames, Buttons, Labels,
-                                 TextBoxes, Images, UICorner, UIListLayout, etc.
-    • Explorer (top right)     — live hierarchy tree with expand/collapse
-    • Properties (below it)    — type-aware editing (UDim2, Color3, Enums, bools)
+    • Insert Panel (left)      — spawn ScreenGuis, Frames, Buttons, Labels, ...
+    • Add Instance dialog      — toolbar button; search any class name
+                                 (e.g. "LocalScript") and spawn it, or press
+                                 Enter to create a custom class by name
+    • Explorer                 — live hierarchy tree (shows ALL children:
+                                 scripts, values, folders, sounds, ...)
+    • Properties               — type-aware editing incl. Script Source
+                                 (multiline), value-object Values, etc.
     • Viewport manipulation    — click to select, drag to move, 8-handle resize
     • ScreenGui protection     — the last remaining ScreenGui can't be deleted
     • Luau Exporter            — serializes the whole project into a clean,
@@ -186,12 +190,11 @@ local State = {
 
 local PROJECT_ATTRIBUTE = "SGC_Project"
 
+-- All children are part of the project tree now (scripts, values, folders...).
 local function treeChildren(inst)
     local out = {}
     for _, child in ipairs(inst:GetChildren()) do
-        if child:IsA("GuiObject") or child:IsA("UIComponent") or child:IsA("UILayout") then
-            table.insert(out, child)
-        end
+        table.insert(out, child)
     end
     return out
 end
@@ -524,7 +527,8 @@ syncSelectionVisuals = function()
     end
 
     pcall(function()
-        -- UI components (UICorner etc.) have no geometry — outline their parent.
+        -- Non-geometric instances (Scripts, UI components, Values...) outline
+        -- their parent instead.
         local boundsTarget = sel:IsA("GuiObject") and sel or sel.Parent
         if not boundsTarget then
             Visuals.container.Visible = false
@@ -881,20 +885,23 @@ end
 -- //////////////////////////////////////////////////////////////////////////
 
 local PROP_GROUPS = {
-    base     = { "Position", "Size", "AnchorPoint", "Rotation", "BackgroundColor3", "BackgroundTransparency", "BorderSizePixel", "Visible", "ZIndex", "ClipsDescendants" },
-    text     = { "Text", "TextColor3", "TextSize", "TextScaled", "Font", "TextTransparency", "RichText", "TextXAlignment", "TextYAlignment" },
-    button   = { "AutoButtonColor" },
-    textbox  = { "PlaceholderText", "PlaceholderColor3", "ClearTextOnFocus", "MultiLine" },
-    image    = { "Image", "ImageColor3", "ImageTransparency" },
-    scroll   = { "CanvasSize", "CanvasPosition", "ScrollingEnabled", "ScrollBarThickness", "ScrollBarImageColor3" },
-    corner   = { "CornerRadius" },
-    stroke   = { "Color", "Thickness", "Transparency", "ApplyStrokeMode" },
-    list     = { "FillDirection", "Padding", "SortOrder", "HorizontalAlignment", "VerticalAlignment" },
-    grid     = { "FillDirection", "CellSize", "CellPadding", "SortOrder", "HorizontalAlignment", "VerticalAlignment" },
-    padding  = { "PaddingTop", "PaddingLeft", "PaddingRight", "PaddingBottom" },
-    scale    = { "Scale" },
-    canvas   = { "GroupTransparency" },
+    base      = { "Position", "Size", "AnchorPoint", "Rotation", "BackgroundColor3", "BackgroundTransparency", "BorderSizePixel", "Visible", "ZIndex", "ClipsDescendants" },
+    text      = { "Text", "TextColor3", "TextSize", "TextScaled", "Font", "TextTransparency", "RichText", "TextXAlignment", "TextYAlignment" },
+    button    = { "AutoButtonColor" },
+    textbox   = { "PlaceholderText", "PlaceholderColor3", "ClearTextOnFocus", "MultiLine" },
+    image     = { "Image", "ImageColor3", "ImageTransparency" },
+    scroll    = { "CanvasSize", "CanvasPosition", "ScrollingEnabled", "ScrollBarThickness", "ScrollBarImageColor3" },
+    corner    = { "CornerRadius" },
+    stroke    = { "Color", "Thickness", "Transparency", "ApplyStrokeMode" },
+    list      = { "FillDirection", "Padding", "SortOrder", "HorizontalAlignment", "VerticalAlignment" },
+    grid      = { "FillDirection", "CellSize", "CellPadding", "SortOrder", "HorizontalAlignment", "VerticalAlignment" },
+    padding   = { "PaddingTop", "PaddingLeft", "PaddingRight", "PaddingBottom" },
+    scale     = { "Scale" },
+    canvas    = { "GroupTransparency" },
     screengui = { "Enabled", "DisplayOrder", "IgnoreGuiInset", "ResetOnSpawn", "ZIndexBehavior" },
+    script    = { "Source", "Disabled" },
+    value     = { "Value" },
+    sound     = { "SoundId", "Volume", "PlaybackSpeed", "Looped", "Playing" },
 }
 
 local CLASS_GROUPS = {
@@ -913,6 +920,21 @@ local CLASS_GROUPS = {
     UIGridLayout   = { "grid" },
     UIPadding      = { "padding" },
     UIScale        = { "scale" },
+    LocalScript    = { "script" },
+    Script         = { "script" },
+    ModuleScript   = { "script" },
+    Folder         = {},
+    Sound          = { "sound" },
+    IntValue       = { "value" },
+    NumberValue    = { "value" },
+    StringValue    = { "value" },
+    BoolValue      = { "value" },
+    ObjectValue    = { "value" },
+    Color3Value    = { "value" },
+    Vector3Value   = { "value" },
+    CFrameValue    = { "value" },
+    BrickColorValue = { "value" },
+    RayValue       = { "value" },
 }
 
 local PROP_TYPES = {
@@ -937,6 +959,22 @@ local PROP_TYPES = {
     Scale = "number", GroupTransparency = "number",
     Enabled = "bool", DisplayOrder = "number", IgnoreGuiInset = "bool",
     ResetOnSpawn = "bool", ZIndexBehavior = "enum:ZIndexBehavior",
+    Source = "source", Disabled = "bool",
+    SoundId = "asset", Volume = "number", PlaybackSpeed = "number", Looped = "bool", Playing = "bool",
+}
+
+-- Per-class overrides for ambiguous property names (Value objects).
+local CLASS_PROP_TYPES = {
+    StringValue     = { Value = "string" },
+    IntValue        = { Value = "number" },
+    NumberValue     = { Value = "number" },
+    BoolValue       = { Value = "bool" },
+    ObjectValue     = { Value = "object" },
+    Color3Value     = { Value = "color" },
+    Vector3Value    = { Value = "vector3" },
+    CFrameValue     = { Value = "object" },
+    BrickColorValue = { Value = "object" },
+    RayValue        = { Value = "object" },
 }
 
 -- //////////////////////////////////////////////////////////////////////////
@@ -1027,6 +1065,8 @@ local function formatValue(ptype, value)
             return ("%s, %s"):format(trimNum(value.Scale), trimNum(value.Offset))
         elseif ptype == "vector2" then
             return ("%s, %s"):format(trimNum(value.X), trimNum(value.Y))
+        elseif ptype == "vector3" then
+            return ("%s, %s, %s"):format(trimNum(value.X), trimNum(value.Y), trimNum(value.Z))
         elseif ptype:sub(1, 5) == "enum:" then
             return value.Name
         elseif ptype == "bool" then
@@ -1040,7 +1080,7 @@ local function formatValue(ptype, value)
 end
 
 local function parsePropertyValue(ptype, text)
-    if ptype == "string" then
+    if ptype == "string" or ptype == "source" then
         return tostring(text)
     elseif ptype == "number" then
         return tonumber(text)
@@ -1064,6 +1104,10 @@ local function parsePropertyValue(ptype, text)
         local nums = parseNumberList(text, 2)
         if not nums then return nil end
         return Vector2.new(nums[1], nums[2])
+    elseif ptype == "vector3" then
+        local nums = parseNumberList(text, 3)
+        if not nums then return nil end
+        return Vector3.new(nums[1], nums[2], nums[3])
     elseif ptype == "asset" then
         return parseAssetText(text)
     elseif ptype:sub(1, 5) == "enum:" then
@@ -1118,6 +1162,35 @@ do
         rowOrder = 0
     end
 
+    local function inferPropType(value)
+        local kind = typeof(value)
+        if kind == "string" then return "string"
+        elseif kind == "number" then return "number"
+        elseif kind == "boolean" then return "bool"
+        elseif kind == "Color3" then return "color"
+        elseif kind == "UDim2" then return "udim2"
+        elseif kind == "UDim" then return "udim"
+        elseif kind == "Vector2" then return "vector2"
+        elseif kind == "Vector3" then return "vector3"
+        end
+        return "object" -- read-only display fallback
+    end
+
+    local function resolvePropType(obj, propName)
+        local classOverride = CLASS_PROP_TYPES[obj.ClassName]
+        if classOverride and classOverride[propName] then
+            return classOverride[propName]
+        end
+        if PROP_TYPES[propName] then
+            return PROP_TYPES[propName]
+        end
+        local ok, value = pcall(function() return obj[propName] end)
+        if ok then
+            return inferPropType(value)
+        end
+        return nil -- property doesn't exist on this instance -> skip the row
+    end
+
     local function addSection(title)
         rowOrder += 1
         create("TextLabel", {
@@ -1154,8 +1227,9 @@ do
 
     local function addPropRow(obj, propName, ptype)
         rowOrder += 1
+        local rowHeight = (ptype == "source") and 96 or 26
         local row = create("Frame", {
-            Size = UDim2.new(1, 0, 0, 26),
+            Size = UDim2.new(1, 0, 0, rowHeight),
             BackgroundTransparency = 1,
             LayoutOrder = rowOrder,
             ZIndex = 12,
@@ -1164,7 +1238,7 @@ do
         create("TextLabel", {
             BackgroundTransparency = 1,
             Position = UDim2.fromOffset(2, 0),
-            Size = UDim2.new(0, 128, 1, 0),
+            Size = UDim2.new(0, 128, 0, 22),
             Text = propName,
             TextColor3 = THEME.TextDim,
             Font = Enum.Font.Gotham,
@@ -1208,6 +1282,79 @@ do
             end)
             refresh()
             rows[propName] = refresh
+
+        elseif ptype == "object" then
+            -- Read-only reference/complex display (ObjectValue.Value, CFrame, ...)
+            local display = create("TextLabel", {
+                Position = UDim2.fromOffset(134, 3),
+                Size = UDim2.new(1, -140, 0, 20),
+                BackgroundColor3 = THEME.PanelAlt,
+                TextColor3 = THEME.TextDim,
+                Font = Enum.Font.Code,
+                TextSize = 12,
+                Text = "",
+                BorderSizePixel = 0,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                ZIndex = 13,
+            }, row)
+            create("UICorner", { CornerRadius = UDim.new(0, 4) }, display)
+            create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, display)
+            create("UIPadding", { PaddingLeft = UDim.new(0, 6) }, display)
+
+            local function refresh()
+                local ok, value = pcall(function() return obj[propName] end)
+                if not ok then return end
+                if typeof(value) == "Instance" then
+                    display.Text = value.Name .. " (" .. value.ClassName .. ")"
+                elseif value == nil then
+                    display.Text = "nil"
+                else
+                    display.Text = tostring(value)
+                end
+            end
+            refresh()
+            rows[propName] = refresh
+
+        elseif ptype == "source" then
+            -- Multiline code editor (LocalScript/Script/ModuleScript Source).
+            local box = create("TextBox", {
+                Position = UDim2.fromOffset(134, 3),
+                Size = UDim2.new(1, -140, 1, -9),
+                BackgroundColor3 = THEME.Control,
+                TextColor3 = THEME.Text,
+                Font = Enum.Font.Code,
+                TextSize = 12,
+                Text = "",
+                MultiLine = true,
+                TextWrapped = false,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                TextYAlignment = Enum.TextYAlignment.Top,
+                ClearTextOnFocus = false,
+                BorderSizePixel = 0,
+                ZIndex = 13,
+            }, row)
+            create("UICorner", { CornerRadius = UDim.new(0, 4) }, box)
+            create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, box)
+            create("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 4) }, box)
+
+            local function refresh()
+                if box:IsFocused() then return end
+                local ok, value = pcall(function() return obj[propName] end)
+                if ok then
+                    box.Text = tostring(value)
+                end
+            end
+            box.FocusLost:Connect(function()
+                local applied = applyProperty(obj, propName, box.Text, "source")
+                if applied then
+                    afterPropertyChange(obj, propName)
+                end
+                refresh()
+            end)
+            refresh()
+            rows[propName] = refresh
+
         else
             local swatch
             if ptype == "color" then
@@ -1258,6 +1405,7 @@ do
         image = "Image", scroll = "Scrolling", corner = "UICorner", stroke = "UIStroke",
         list = "UIListLayout", grid = "UIGridLayout", padding = "UIPadding",
         scale = "UIScale", canvas = "CanvasGroup", screengui = "ScreenGui",
+        script = "Script", value = "Value", sound = "Sound",
     }
 
     function PropPanel.build(obj)
@@ -1269,7 +1417,8 @@ do
         end
 
         addSection("Data")
-        addPropRow(obj, "Name", "string")
+        local nameType = resolvePropType(obj, "Name") or "string"
+        addPropRow(obj, "Name", nameType)
 
         local groups = CLASS_GROUPS[obj.ClassName] or { "base" }
         for _, groupKey in ipairs(groups) do
@@ -1277,7 +1426,10 @@ do
             if propList then
                 addSection(GROUP_TITLES[groupKey] or groupKey)
                 for _, propName in ipairs(propList) do
-                    addPropRow(obj, propName, PROP_TYPES[propName] or "string")
+                    local ptype = resolvePropType(obj, propName)
+                    if ptype then
+                        addPropRow(obj, propName, ptype)
+                    end
                 end
             end
         end
@@ -1328,6 +1480,21 @@ local CLASS_COLORS = {
     UIGridLayout   = Color3.fromRGB(235, 195, 90),
     UIPadding      = Color3.fromRGB(235, 195, 90),
     UIScale        = Color3.fromRGB(235, 195, 90),
+    LocalScript    = Color3.fromRGB(120, 200, 160),
+    Script         = Color3.fromRGB(120, 200, 160),
+    ModuleScript   = Color3.fromRGB(160, 200, 120),
+    Folder         = Color3.fromRGB(235, 190, 95),
+    Sound          = Color3.fromRGB(170, 130, 220),
+    IntValue       = Color3.fromRGB(130, 160, 235),
+    NumberValue    = Color3.fromRGB(130, 160, 235),
+    StringValue    = Color3.fromRGB(130, 160, 235),
+    BoolValue      = Color3.fromRGB(130, 160, 235),
+    ObjectValue    = Color3.fromRGB(130, 160, 235),
+    Color3Value    = Color3.fromRGB(130, 160, 235),
+    Vector3Value   = Color3.fromRGB(130, 160, 235),
+    CFrameValue    = Color3.fromRGB(130, 160, 235),
+    BrickColorValue = Color3.fromRGB(130, 160, 235),
+    RayValue       = Color3.fromRGB(130, 160, 235),
 }
 
 local CATALOG = {
@@ -1452,27 +1619,40 @@ function Editor.spawnClass(class)
         local sg = createProjectScreenGui()
         invalidateExplorer()
         Editor.select(sg)
-        notify("Created ScreenGui '" .. sg.Name .. "'", "success")
+        notify("Created ScreenGui '" .. sg.Name .. "'", "success", 2)
         return sg
     end
 
     local parent, err = resolveSpawnParent(class)
     if not parent then
-        notify(err or ("Cannot spawn " .. class), "warn")
+        notify(err or ("Cannot spawn " .. class), "warn", 2.5)
         return nil
     end
 
-    local inst = Instance.new(class)
+    local okInst, inst = pcall(Instance.new, class)
+    if not okInst or not inst then
+        notify(("Cannot create class '%s'."):format(tostring(class)), "error", 3)
+        return nil
+    end
     inst.Name = uniqueName(class)
+
     local decorator = SPAWN_DEFAULTS[class]
     if decorator then
         State.spawnCascade = (State.spawnCascade + 1) % 8
         local cascade = State.spawnCascade * 16
         pcall(function() decorator(inst, 24 + cascade, 24 + cascade) end)
     end
-    pcall(function() inst.Parent = parent end)
+
+    local parentOk = pcall(function() inst.Parent = parent end)
+    if not parentOk then
+        pcall(function() inst:Destroy() end)
+        notify(("Cannot place %s under %s."):format(class, parent.ClassName), "error", 3)
+        return nil
+    end
+
     invalidateExplorer()
     Editor.select(inst)
+    notify(("Created %s '%s'"):format(class, inst.Name), "success", 2)
     return inst
 end
 
@@ -2031,10 +2211,12 @@ local function valueToLuau(value)
         return ("UDim.new(%s, %s)"):format(trimNum(value.Scale), trimNum(value.Offset))
     elseif kind == "Vector2" then
         return ("Vector2.new(%s, %s)"):format(trimNum(value.X), trimNum(value.Y))
+    elseif kind == "Vector3" then
+        return ("Vector3.new(%s, %s, %s)"):format(trimNum(value.X), trimNum(value.Y), trimNum(value.Z))
     elseif kind == "EnumItem" then
         return tostring(value)
     end
-    return nil
+    return nil -- Instance refs / CFrame / BrickColor / Ray are not serializable
 end
 
 local function exportPropertyNameList(className)
@@ -2320,6 +2502,291 @@ do
 end
 
 -- //////////////////////////////////////////////////////////////////////////
+-- ADD INSTANCE DIALOG (searchable class picker, supports LocalScript etc.)
+-- //////////////////////////////////////////////////////////////////////////
+
+local INSTANCE_CATALOG = {
+    -- GUI
+    { class = "ScreenGui",      category = "GUI" },
+    { class = "Frame",          category = "GUI" },
+    { class = "ScrollingFrame", category = "GUI" },
+    { class = "CanvasGroup",    category = "GUI" },
+    { class = "TextLabel",      category = "GUI" },
+    { class = "TextButton",     category = "GUI" },
+    { class = "TextBox",        category = "GUI" },
+    { class = "ImageLabel",     category = "GUI" },
+    { class = "ImageButton",    category = "GUI" },
+    { class = "UICorner",       category = "GUI" },
+    { class = "UIStroke",       category = "GUI" },
+    { class = "UIListLayout",   category = "GUI" },
+    { class = "UIGridLayout",   category = "GUI" },
+    { class = "UIPadding",      category = "GUI" },
+    { class = "UIScale",        category = "GUI" },
+    -- Scripts
+    { class = "LocalScript",    category = "Scripts" },
+    { class = "Script",         category = "Scripts" },
+    { class = "ModuleScript",   category = "Scripts" },
+    -- Values
+    { class = "StringValue",      category = "Values" },
+    { class = "IntValue",         category = "Values" },
+    { class = "NumberValue",      category = "Values" },
+    { class = "BoolValue",        category = "Values" },
+    { class = "ObjectValue",      category = "Values" },
+    { class = "Color3Value",      category = "Values" },
+    { class = "Vector3Value",     category = "Values" },
+    { class = "CFrameValue",      category = "Values" },
+    { class = "BrickColorValue",  category = "Values" },
+    { class = "RayValue",         category = "Values" },
+    -- Other
+    { class = "Folder", category = "Other" },
+    { class = "Sound",  category = "Other" },
+}
+
+-- Validates that a class name can actually be instantiated on this client.
+local function isClassCreatable(className)
+    local ok, probe = pcall(Instance.new, className)
+    if ok and probe then
+        pcall(function() probe:Destroy() end)
+        return true
+    end
+    return false
+end
+
+do
+    local dialog = create("Frame", {
+        Name = "AddInstanceDialog",
+        Size = UDim2.fromOffset(380, 400),
+        Position = UDim2.fromOffset(140, 110),
+        BackgroundColor3 = THEME.Window,
+        BorderSizePixel = 0,
+        Visible = false,
+        Active = true,
+        ZIndex = 60,
+    }, Overlay)
+    create("UICorner", { CornerRadius = UDim.new(0, 8) }, dialog)
+    create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, dialog)
+
+    -- Header
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(14, 0),
+        Size = UDim2.new(1, -110, 0, 32),
+        Text = "Add Instance",
+        TextColor3 = THEME.Text,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 61,
+    }, dialog)
+    do
+        local closeButton = create("TextButton", {
+            Size = UDim2.fromOffset(26, 20),
+            Position = UDim2.new(1, -34, 0, 6),
+            BackgroundColor3 = THEME.Control,
+            BorderSizePixel = 0,
+            Text = "×",
+            TextColor3 = THEME.Text,
+            Font = Enum.Font.GothamBold,
+            TextSize = 12,
+            AutoButtonColor = false,
+            ZIndex = 61,
+        }, dialog)
+        create("UICorner", { CornerRadius = UDim.new(0, 4) }, closeButton)
+        closeButton.MouseEnter:Connect(function() closeButton.BackgroundColor3 = THEME.ControlHover end)
+        closeButton.MouseLeave:Connect(function() closeButton.BackgroundColor3 = THEME.Control end)
+        closeButton.Activated:Connect(function() dialog.Visible = false end)
+    end
+
+    -- Search box
+    local searchBox = create("TextBox", {
+        Position = UDim2.fromOffset(8, 36),
+        Size = UDim2.new(1, -16, 0, 28),
+        BackgroundColor3 = THEME.Control,
+        TextColor3 = THEME.Text,
+        PlaceholderText = "Search or type a class name (e.g. LocalScript)",
+        PlaceholderColor3 = THEME.TextDim,
+        Font = Enum.Font.Gotham,
+        TextSize = 12,
+        Text = "",
+        ClearTextOnFocus = false,
+        BorderSizePixel = 0,
+        ZIndex = 61,
+    }, dialog)
+    create("UICorner", { CornerRadius = UDim.new(0, 5) }, searchBox)
+    create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, searchBox)
+    create("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 6) }, searchBox)
+
+    -- Result list
+    local listScroll = create("ScrollingFrame", {
+        Position = UDim2.fromOffset(8, 70),
+        Size = UDim2.new(1, -16, 1, -96),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        CanvasSize = UDim2.new(),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        ScrollBarThickness = 4,
+        ScrollBarImageColor3 = THEME.ControlHover,
+        ElasticBehavior = Enum.ElasticBehavior.Never,
+        ZIndex = 61,
+    }, dialog)
+    create("UIListLayout", {
+        Padding = UDim.new(0, 2),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+    }, listScroll)
+
+    create("TextLabel", {
+        Position = UDim2.new(0, 8, 1, -22),
+        Size = UDim2.new(1, -16, 0, 18),
+        BackgroundTransparency = 1,
+        Text = "Tip: type ANY class name and press Enter to create it.",
+        TextColor3 = THEME.TextDim,
+        Font = Enum.Font.Gotham,
+        TextSize = 10,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 61,
+    }, dialog)
+
+    local function addListRow(scroll, labelText, categoryText, order, onClick, dotColor)
+        local btn = create("TextButton", {
+            Size = UDim2.new(1, 0, 0, 26),
+            BackgroundColor3 = THEME.Control,
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            AutoButtonColor = false,
+            Text = "",
+            LayoutOrder = order,
+            ZIndex = 61,
+        }, scroll)
+        local dot = create("Frame", {
+            Size = UDim2.fromOffset(10, 10),
+            Position = UDim2.fromOffset(8, 8),
+            BackgroundColor3 = dotColor or CLASS_COLORS[labelText] or THEME.TextDim,
+            BorderSizePixel = 0,
+            ZIndex = 62,
+        }, btn)
+        create("UICorner", { CornerRadius = UDim.new(0, 2) }, dot)
+        create("TextLabel", {
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(26, 0),
+            Size = UDim2.new(1, -110, 1, 0),
+            Text = labelText,
+            TextColor3 = Color3.fromRGB(205, 205, 214),
+            Font = Enum.Font.Gotham,
+            TextSize = 12,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            ZIndex = 62,
+        }, btn)
+        if categoryText then
+            create("TextLabel", {
+                BackgroundTransparency = 1,
+                AnchorPoint = Vector2.new(1, 0),
+                Position = UDim2.new(1, -6, 0, 0),
+                Size = UDim2.fromOffset(96, 26),
+                Text = categoryText,
+                TextColor3 = THEME.TextDim,
+                Font = Enum.Font.Gotham,
+                TextSize = 10,
+                TextXAlignment = Enum.TextXAlignment.Right,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                ZIndex = 62,
+            }, btn)
+        end
+        btn.MouseEnter:Connect(function()
+            btn.BackgroundTransparency = 0
+        end)
+        btn.MouseLeave:Connect(function()
+            btn.BackgroundTransparency = 1
+        end)
+        btn.Activated:Connect(onClick)
+        return btn
+    end
+
+    local function trySpawnFromText(raw)
+        local className = tostring(raw):gsub("^%s+", ""):gsub("%s+$", "")
+        if className == "" then
+            return
+        end
+        -- Exact catalog match first (guarantees friendly handling).
+        for _, entry in ipairs(INSTANCE_CATALOG) do
+            if entry.class:lower() == className:lower() then
+                Editor.spawnClass(entry.class)
+                return
+            end
+        end
+        -- Free-text path: validate the class is creatable, then spawn it.
+        if isClassCreatable(className) then
+            Editor.spawnClass(className)
+        else
+            notify("Unknown or restricted class: " .. className, "error", 3)
+        end
+    end
+
+    local function rebuildList()
+        for _, child in ipairs(listScroll:GetChildren()) do
+            if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+                child:Destroy()
+            end
+        end
+
+        local query = tostring(searchBox.Text):lower()
+        query = query:gsub("^%s+", ""):gsub("%s+$", "")
+
+        local order = 0
+        local matchCount = 0
+
+        for _, entry in ipairs(INSTANCE_CATALOG) do
+            if query == "" or entry.class:lower():find(query, 1, true) then
+                matchCount += 1
+                order += 1
+                local class = entry.class
+                addListRow(listScroll, class, entry.category, order, function()
+                    Editor.spawnClass(class)
+                end)
+            end
+        end
+
+        -- No catalog match: offer to create the typed name as a custom class.
+        if matchCount == 0 and query ~= "" then
+            local raw = tostring(searchBox.Text):gsub("^%s+", ""):gsub("%s+$", "")
+            order += 1
+            addListRow(listScroll, "+  Create custom class \"" .. raw .. "\"", "Custom", order, function()
+                trySpawnFromText(raw)
+            end, THEME.Accent)
+        end
+    end
+
+    searchBox:GetPropertyChangedSignal("Text"):Connect(rebuildList)
+    searchBox.FocusLost:Connect(function(enterPressed)
+        if not enterPressed then return end
+        trySpawnFromText(searchBox.Text)
+        task.defer(function()
+            pcall(function() searchBox:CaptureFocus() end)
+        end)
+    end)
+
+    function Editor.openAddInstance()
+        -- Center over the main window.
+        pcall(function()
+            local mp, ms = UI.main.AbsolutePosition, UI.main.AbsoluteSize
+            dialog.Position = UDim2.fromOffset(
+                math.floor(mp.X + (ms.X - 380) / 2),
+                math.floor(mp.Y + (ms.Y - 400) / 2)
+            )
+        end)
+        searchBox.Text = ""
+        rebuildList()
+        dialog.Visible = true
+        task.defer(function()
+            pcall(function() searchBox:CaptureFocus() end)
+        end)
+    end
+
+    table.insert(UI.windows, dialog)
+end
+
+-- //////////////////////////////////////////////////////////////////////////
 -- EDITOR ACTIONS
 -- //////////////////////////////////////////////////////////////////////////
 
@@ -2411,12 +2878,13 @@ end
 
 do
     UI.makeToolbarButton("+ ScreenGui", function() Editor.spawnClass("ScreenGui") end, { width = 96, order = 1 })
-    UI.makeToolbarButton("Duplicate", function() Editor.duplicateSelected() end, { width = 80, order = 2 })
-    UI.makeToolbarButton("Delete", function() Editor.deleteSelected() end, { width = 64, order = 3 })
-    UI.makeToolbarButton("Export Luau", function() Editor.openExport() end, { width = 96, order = 4, accent = true })
+    UI.makeToolbarButton("Add Instance", function() Editor.openAddInstance() end, { width = 88, order = 2 })
+    UI.makeToolbarButton("Duplicate", function() Editor.duplicateSelected() end, { width = 80, order = 3 })
+    UI.makeToolbarButton("Delete", function() Editor.deleteSelected() end, { width = 64, order = 4 })
+    UI.makeToolbarButton("Export Luau", function() Editor.openExport() end, { width = 96, order = 5, accent = true })
     UI.modeButton = UI.makeToolbarButton("Mode: Edit", function()
         Editor.setEditMode(not State.editMode)
-    end, { width = 96, order = 5 })
+    end, { width = 96, order = 6 })
 end
 
 -- //////////////////////////////////////////////////////////////////////////
@@ -2471,7 +2939,7 @@ end
 updateStatus()
 
 notify("StudioGUI Creator loaded — " .. Executor.name, "success", 3.5)
-print("[StudioGUI Creator] Ready. Insert from the left panel, drag on screen to arrange, 'Export Luau' to serialize.")
+print("[StudioGUI Creator] Ready. Insert from the left panel, 'Add Instance' for any class (LocalScript, Values...), 'Export Luau' to serialize.")
 
 end -- main()
 
