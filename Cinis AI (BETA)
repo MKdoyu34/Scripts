@@ -1,0 +1,2003 @@
+--[[
+    Cinis AI - standalone AI chat interface for Roblox executors (Delta / Arceus X)
+    Three parts only: collapsible Sidebar | Main Chat | Settings overlay
+
+    - Themes: "Moonlight" (dark) and "Sunset" (light), toggle in Settings, choice saved
+    - Providers: OpenAI, Google DeepMind, Anthropic, Custom (OpenAI-compatible)
+    - Every model list is user-maintained in Settings; API keys are stored locally
+    - Uses writefile/readfile when available, otherwise keeps everything in memory
+    - UI parents to gethui() > CoreGui > PlayerGui, each step guarded
+]]
+
+-- ===========================================================================
+-- 1. SERVICES & EXECUTOR ENVIRONMENT (every executor global is guarded)
+-- ===========================================================================
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- HTTP: prefer request, fall back to http_request (Delta / Arceus X)
+local httpRequest = nil
+if type(request) == "function" then
+    httpRequest = request
+elseif type(http_request) == "function" then
+    httpRequest = http_request
+end
+
+-- File system helpers; nil when the executor does not expose them
+local FS = {
+    write = (type(writefile) == "function") and writefile or nil,
+    read = (type(readfile) == "function") and readfile or nil,
+    exists = (type(isfile) == "function") and isfile or nil,
+    folderExists = (type(isfolder) == "function") and isfolder or nil,
+    mkdir = (type(makefolder) == "function") and makefolder or nil,
+}
+FS.available = (FS.write ~= nil) and (FS.read ~= nil)
+
+-- Pick the safest available parent for the ScreenGui
+local function resolveGuiParent()
+    local candidates = {}
+    if type(gethui) == "function" then
+        table.insert(candidates, function()
+            local ok, ui = pcall(gethui)
+            return ok and ui or nil
+        end)
+    end
+    table.insert(candidates, function()
+        return game:GetService("CoreGui")
+    end)
+    table.insert(candidates, function()
+        return LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    end)
+    for _, attempt in ipairs(candidates) do
+        local ok, target = pcall(attempt)
+        if ok and target then
+            local writable = pcall(function()
+                local probe = Instance.new("Folder")
+                probe.Name = "CinisAICheck"
+                probe.Parent = target
+                probe:Destroy()
+            end)
+            if writable then
+                return target
+            end
+        end
+    end
+    return nil
+end
+
+-- ===========================================================================
+-- 2. CONFIG & ICONS
+-- ===========================================================================
+local CONFIG = {
+    folder = "cinis_ai",
+    settingsFile = "cinis_ai/settings.json",
+    chatsFile = "cinis_ai/chats.json",
+    systemPrompt = "You are Cinis AI, a concise and helpful assistant. Keep replies clear and to the point.",
+    providers = { "OpenAI", "Google DeepMind", "Anthropic", "Custom" },
+    sidebarWidth = 236,
+    historyLimit = 40, -- max messages sent to the API per request
+}
+
+-- Lucide icon asset IDs (public Fluent icon pack uploads)
+local ICONS = {
+    send = "rbxassetid://10734943902",
+    plus = "rbxassetid://10734924532",
+    trash = "rbxassetid://10747362241",
+    settings = "rbxassetid://10734950309",
+    close = "rbxassetid://10747384394",
+    minimize = "rbxassetid://10734896206",
+    chevronDown = "rbxassetid://10709790948",
+    sidebarClose = "rbxassetid://10734953715",
+    sidebarOpen = "rbxassetid://10734954000",
+    pencil = "rbxassetid://10734919691",
+    moon = "rbxassetid://10734897102",
+    sun = "rbxassetid://10734974297",
+}
+
+-- ===========================================================================
+-- 3. STATE & STORAGE (settings + chat history, file-backed or in-memory)
+-- ===========================================================================
+local Settings = {
+    theme = "Moonlight",
+    keys = { ["OpenAI"] = "", ["Google DeepMind"] = "", ["Anthropic"] = "", ["Custom"] = "" },
+    models = {}, -- user-maintained: { uid, name, modelId, provider, baseUrl, authHeader }
+    activeModel = nil, -- uid of the selected model
+    lastChat = nil, -- uid of the last opened chat
+    sidebarCollapsed = false,
+}
+local Chats = {} -- { { uid, title, messages = { { role, content } } } }
+local Session = { activeChat = nil, pendingChatUid = nil, shutdown = false }
+
+local function getActiveModel()
+    if not Settings.activeModel then
+        return nil
+    end
+    for _, model in ipairs(Settings.models) do
+        if model.uid == Settings.activeModel then
+            return model
+        end
+    end
+    return nil
+end
+
+local function readJson(file)
+    if not FS.available then
+        return nil
+    end
+    local ok, result = pcall(function()
+        if FS.exists and FS.exists(file) then
+            local raw = FS.read(file)
+            if type(raw) == "string" and raw ~= "" then
+                return HttpService:JSONDecode(raw)
+            end
+        end
+        return nil
+    end)
+    if ok then
+        return result
+    end
+    return nil
+end
+
+local function writeJson(file, data)
+    if not FS.available then
+        return
+    end
+    pcall(function()
+        if FS.folderExists and not FS.folderExists(CONFIG.folder) and FS.mkdir then
+            FS.mkdir(CONFIG.folder)
+        end
+        FS.write(file, HttpService:JSONEncode(data))
+    end)
+end
+
+local function saveSettings()
+    writeJson(CONFIG.settingsFile, Settings)
+end
+
+local function saveChats()
+    writeJson(CONFIG.chatsFile, Chats)
+end
+
+-- Load and sanitise saved data (bad fields fall back to defaults)
+local function loadState()
+    local saved = readJson(CONFIG.settingsFile)
+    if type(saved) == "table" then
+        Settings.theme = (saved.theme == "Sunset" or saved.theme == "Moonlight") and saved.theme or "Moonlight"
+        if type(saved.keys) == "table" then
+            for _, provider in ipairs(CONFIG.providers) do
+                Settings.keys[provider] = tostring(saved.keys[provider] or "")
+            end
+        end
+        if type(saved.models) == "table" then
+            for _, model in ipairs(saved.models) do
+                if type(model) == "table" and type(model.modelId) == "string" and model.modelId ~= "" then
+                    table.insert(Settings.models, {
+                        uid = tostring(model.uid or HttpService:GenerateGUID(false)),
+                        name = tostring(model.name or model.modelId),
+                        modelId = model.modelId,
+                        provider = (table.find(CONFIG.providers, model.provider) and model.provider) or "OpenAI",
+                        baseUrl = tostring(model.baseUrl or ""),
+                        authHeader = tostring(model.authHeader or ""),
+                    })
+                end
+            end
+        end
+        Settings.activeModel = type(saved.activeModel) == "string" and saved.activeModel or nil
+        Settings.lastChat = type(saved.lastChat) == "string" and saved.lastChat or nil
+        Settings.sidebarCollapsed = saved.sidebarCollapsed == true
+    end
+
+    local savedChats = readJson(CONFIG.chatsFile)
+    if type(savedChats) == "table" then
+        for _, chat in ipairs(savedChats) do
+            if type(chat) == "table" and type(chat.messages) == "table" then
+                local clean = {
+                    uid = tostring(chat.uid or HttpService:GenerateGUID(false)),
+                    title = tostring(chat.title or "New Chat"),
+                    messages = {},
+                }
+                for _, msg in ipairs(chat.messages) do
+                    if type(msg) == "table" and type(msg.content) == "string"
+                        and (msg.role == "user" or msg.role == "assistant" or msg.role == "error") then
+                        table.insert(clean.messages, { role = msg.role, content = msg.content })
+                    end
+                end
+                table.insert(Chats, clean)
+            end
+        end
+    end
+end
+
+loadState()
+
+-- ===========================================================================
+-- 4. THEME (Moonlight / Sunset with instant, registry-driven updates)
+-- ===========================================================================
+local THEMES = {
+    Moonlight = {
+        Background = Color3.fromRGB(13, 16, 28),
+        Surface = Color3.fromRGB(19, 23, 39),
+        SurfaceAlt = Color3.fromRGB(28, 33, 54),
+        InputBg = Color3.fromRGB(23, 27, 46),
+        Stroke = Color3.fromRGB(56, 63, 99),
+        Text = Color3.fromRGB(234, 236, 247),
+        TextDim = Color3.fromRGB(148, 155, 186),
+        Icon = Color3.fromRGB(205, 211, 235),
+        Accent = Color3.fromRGB(167, 139, 250),
+        GradientA = Color3.fromRGB(122, 96, 224),
+        GradientB = Color3.fromRGB(186, 162, 255),
+        AccentSoft = Color3.fromRGB(59, 52, 100),
+        BubbleAI = Color3.fromRGB(28, 33, 54),
+        Error = Color3.fromRGB(59, 27, 35),
+        ErrorText = Color3.fromRGB(255, 136, 146),
+        OnAccent = Color3.fromRGB(255, 255, 255),
+    },
+    Sunset = {
+        Background = Color3.fromRGB(255, 246, 235),
+        Surface = Color3.fromRGB(255, 238, 222),
+        SurfaceAlt = Color3.fromRGB(255, 229, 206),
+        InputBg = Color3.fromRGB(255, 243, 230),
+        Stroke = Color3.fromRGB(238, 203, 176),
+        Text = Color3.fromRGB(76, 52, 38),
+        TextDim = Color3.fromRGB(166, 124, 99),
+        Icon = Color3.fromRGB(112, 78, 58),
+        Accent = Color3.fromRGB(255, 128, 84),
+        GradientA = Color3.fromRGB(255, 116, 76),
+        GradientB = Color3.fromRGB(255, 178, 92),
+        AccentSoft = Color3.fromRGB(255, 208, 178),
+        BubbleAI = Color3.fromRGB(255, 233, 211),
+        Error = Color3.fromRGB(255, 216, 205),
+        ErrorText = Color3.fromRGB(176, 56, 42),
+        OnAccent = Color3.fromRGB(255, 255, 255),
+    },
+}
+
+local Theme = { name = "Moonlight", current = THEMES.Moonlight }
+local themeBindings = {} -- { { inst, prop, key } } auto-updated on theme switch
+local themeHooks = {} -- custom update functions (gradients, icons, labels)
+
+local function bindTheme(inst, prop, key)
+    table.insert(themeBindings, { inst = inst, prop = prop, key = key })
+    inst[prop] = Theme.current[key]
+end
+
+local function onTheme(fn)
+    table.insert(themeHooks, fn)
+end
+
+-- Shared namespace tables (keep the main chunk's local count low)
+local UI = {} -- GUI instances shared across sections
+local Fn = {} -- functions shared across sections
+
+function Fn.applyTheme(name)
+    local theme = THEMES[name] or THEMES.Moonlight
+    Theme.name = theme == THEMES.Sunset and "Sunset" or "Moonlight"
+    Theme.current = theme
+    for _, binding in ipairs(themeBindings) do
+        pcall(function()
+            binding.inst[binding.prop] = theme[binding.key]
+        end)
+    end
+    for _, hook in ipairs(themeHooks) do
+        pcall(hook, theme)
+    end
+    Settings.theme = Theme.name
+    saveSettings()
+end
+
+-- ===========================================================================
+-- 5. SHARED UI HELPERS & CONNECTION TRACKING
+-- ===========================================================================
+local connections = {}
+
+local function on(signal, handler)
+    local conn = signal:Connect(handler)
+    table.insert(connections, conn)
+    return conn
+end
+
+local function create(className, props, children)
+    local inst = Instance.new(className)
+    for key, value in pairs(props or {}) do
+        if key ~= "Parent" then
+            inst[key] = value
+        end
+    end
+    for _, child in ipairs(children or {}) do
+        child.Parent = inst
+    end
+    if props and props.Parent then
+        inst.Parent = props.Parent
+    end
+    return inst
+end
+
+local function corner(parent, radius)
+    return create("UICorner", { CornerRadius = UDim.new(0, radius), Parent = parent })
+end
+
+local function stroke(parent, colorKey, thickness, transparency)
+    local s = create("UIStroke", {
+        Thickness = thickness or 1,
+        Transparency = transparency == nil and 0.3 or transparency,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+        Parent = parent,
+    })
+    bindTheme(s, "Color", colorKey or "Stroke")
+    return s
+end
+
+local function makeLabel(props, colorKey)
+    local inst = create("TextLabel", props)
+    bindTheme(inst, "TextColor3", colorKey or "Text")
+    return inst
+end
+
+-- The Cinis AI logo: letter "C" in an accent rounded square with a gradient
+local function makeLogo(size, parent)
+    local holder = create("Frame", {
+        Size = UDim2.fromOffset(size, size),
+        BackgroundColor3 = Theme.current.Accent,
+        Parent = parent,
+    })
+    bindTheme(holder, "BackgroundColor3", "Accent")
+    corner(holder, math.max(6, math.floor(size * 0.3)))
+    local gradient = create("UIGradient", { Parent = holder })
+    local function paintGradient(theme)
+        gradient.Color = ColorSequence.new(theme.GradientA, theme.GradientB)
+    end
+    paintGradient(Theme.current)
+    onTheme(paintGradient)
+    makeLabel({
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        Font = Enum.Font.GothamBlack,
+        Text = "C",
+        TextScaled = true,
+        Parent = holder,
+    }, "OnAccent")
+    return holder
+end
+
+local function iconButton(parent, size, iconId)
+    local btn = create("ImageButton", {
+        Size = UDim2.fromOffset(size, size),
+        BackgroundTransparency = 1,
+        Image = iconId,
+        ImageTransparency = 0.15,
+        AutoButtonColor = false,
+        Parent = parent,
+    })
+    bindTheme(btn, "ImageColor3", "Icon")
+    on(btn.MouseEnter, function()
+        btn.ImageTransparency = 0
+    end)
+    on(btn.MouseLeave, function()
+        btn.ImageTransparency = 0.15
+    end)
+    return btn
+end
+
+-- Non-interactive icon (chevrons inside buttons; keeps button click handling)
+local function iconLabel(parent, size, iconId)
+    local img = create("ImageLabel", {
+        Size = UDim2.fromOffset(size, size),
+        BackgroundTransparency = 1,
+        Image = iconId,
+        ImageTransparency = 0.3,
+        Parent = parent,
+    })
+    bindTheme(img, "ImageColor3", "Icon")
+    return img
+end
+
+-- Dropdown popup shared by the model menu and the settings provider menu
+local activePopup = nil
+
+function Fn.closePopup()
+    if activePopup then
+        activePopup:Destroy()
+        activePopup = nil
+    end
+end
+
+function Fn.openDropdown(anchorButton, width, items, onSelect, activeId)
+    Fn.closePopup()
+    local backdrop = create("TextButton", {
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Text = "",
+        ZIndex = 90,
+        Parent = UI.gui,
+    })
+    on(backdrop.Activated, Fn.closePopup)
+
+    local rowHeight = 30
+    for _, item in ipairs(items) do
+        if item.sub then
+            rowHeight = 40
+        end
+    end
+    local menuHeight = math.min(#items * (rowHeight + 4) + 10, 260)
+    local anchorPos = anchorButton.AbsolutePosition
+    local menu = create("Frame", {
+        Size = UDim2.fromOffset(width, menuHeight),
+        Position = UDim2.fromOffset(anchorPos.X, anchorPos.Y + anchorButton.AbsoluteSize.Y + 6),
+        BackgroundColor3 = Theme.current.Surface,
+        ZIndex = 91,
+        Parent = backdrop,
+    })
+    bindTheme(menu, "BackgroundColor3", "Surface")
+    corner(menu, 10)
+    stroke(menu, "Stroke", 1, 0.35)
+
+    local list = create("ScrollingFrame", {
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Size = UDim2.fromScale(1, 1),
+        CanvasSize = UDim2.new(),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        ScrollBarThickness = 3,
+        ScrollBarImageTransparency = 0.35,
+        ZIndex = 92,
+        Parent = menu,
+    })
+    bindTheme(list, "ScrollBarImageColor3", "Stroke")
+    create("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = list })
+    create("UIPadding", {
+        PaddingLeft = UDim.new(0, 6),
+        PaddingRight = UDim.new(0, 6),
+        PaddingTop = UDim.new(0, 6),
+        PaddingBottom = UDim.new(0, 6),
+        Parent = list,
+    })
+
+    for index, item in ipairs(items) do
+        local isActive = item.id == activeId
+        local row = create("TextButton", {
+            Size = UDim2.new(1, 0, 0, rowHeight),
+            BackgroundColor3 = Theme.current.SurfaceAlt,
+            BackgroundTransparency = isActive and 0 or 1,
+            Text = "",
+            AutoButtonColor = false,
+            ZIndex = 93,
+            LayoutOrder = index,
+            Parent = list,
+        })
+        bindTheme(row, "BackgroundColor3", "SurfaceAlt")
+        corner(row, 8)
+        if item.sub then
+            makeLabel({
+                Position = UDim2.fromOffset(10, 4),
+                Size = UDim2.new(1, -20, 0, 15),
+                Font = Enum.Font.GothamMedium,
+                TextSize = 13,
+                Text = item.label,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                ZIndex = 94,
+                Parent = row,
+            }, isActive and "Accent" or "Text")
+            makeLabel({
+                Position = UDim2.fromOffset(10, 22),
+                Size = UDim2.new(1, -20, 0, 12),
+                Font = Enum.Font.Gotham,
+                TextSize = 11,
+                Text = item.sub,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                ZIndex = 94,
+                Parent = row,
+            }, "TextDim")
+        else
+            makeLabel({
+                Position = UDim2.fromOffset(10, 0),
+                Size = UDim2.new(1, -20, 1, 0),
+                Font = Enum.Font.GothamMedium,
+                TextSize = 13,
+                Text = item.label,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                ZIndex = 94,
+                Parent = row,
+            }, isActive and "Accent" or "Text")
+        end
+        on(row.Activated, function()
+            Fn.closePopup()
+            onSelect(item.id)
+        end)
+    end
+
+    activePopup = backdrop
+end
+
+-- ===========================================================================
+-- 6. ROOT WINDOW (ScreenGui, main frame, minimize pill, shutdown)
+-- ===========================================================================
+do
+    local guiParent = resolveGuiParent()
+    UI.gui = create("ScreenGui", {
+        Name = "CinisAI",
+        ResetOnSpawn = false,
+        IgnoreGuiInset = true,
+        DisplayOrder = 1000,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    })
+    if guiParent then
+        pcall(function()
+            UI.gui.Parent = guiParent
+        end)
+    end
+    if not UI.gui.Parent then
+        pcall(function()
+            UI.gui.Parent = LocalPlayer:WaitForChild("PlayerGui", 5)
+        end)
+    end
+
+    UI.root = create("Frame", {
+        Name = "Window",
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.new(0.75, 0, 0.75, 0), -- scale-based sizing: fits every device
+        BackgroundColor3 = Theme.current.Background,
+        ClipsDescendants = true,
+        Parent = UI.gui,
+    })
+    bindTheme(UI.root, "BackgroundColor3", "Background")
+    corner(UI.root, 14)
+    stroke(UI.root, "Stroke", 1, 0.35)
+    create("UISizeConstraint", { MinSize = Vector2.new(620, 420), Parent = UI.root })
+
+    -- Floating restore pill shown while the window is minimized
+    local restore = create("TextButton", {
+        Name = "Restore",
+        Text = "",
+        AutoButtonColor = true,
+        Visible = false,
+        Size = UDim2.fromOffset(46, 46),
+        Position = UDim2.new(0, 18, 1, -66),
+        BackgroundColor3 = Theme.current.Accent,
+        Parent = UI.gui,
+    })
+    bindTheme(restore, "BackgroundColor3", "Accent")
+    corner(restore, 12)
+    stroke(restore, "GradientA", 1, 0.2)
+    makeLabel({
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        Font = Enum.Font.GothamBlack,
+        Text = "C",
+        TextScaled = true,
+        Parent = restore,
+    }, "OnAccent")
+    on(restore.Activated, function()
+        UI.root.Visible = true
+        restore.Visible = false
+    end)
+
+    -- Hide the window and surface the restore pill
+    function Fn.minimize()
+        Fn.closePopup()
+        UI.root.Visible = false
+        restore.Visible = true
+    end
+
+    -- Tear everything down: save, disconnect every tracked connection, destroy
+    function Fn.shutdown()
+        if Session.shutdown then
+            return
+        end
+        Session.shutdown = true
+        Fn.closePopup()
+        saveSettings()
+        saveChats()
+        for _, conn in ipairs(connections) do
+            pcall(function()
+                conn:Disconnect()
+            end)
+        end
+        table.clear(connections)
+        UI.gui:Destroy()
+    end
+end
+
+-- ===========================================================================
+-- 7. PROVIDERS & HTTP (OpenAI / Google DeepMind / Anthropic / Custom)
+-- ===========================================================================
+do
+    -- Google and Anthropic reject consecutive same-role messages; merge them
+    local function mergeAlternating(messages)
+        local merged = {}
+        for _, msg in ipairs(messages) do
+            local last = merged[#merged]
+            if last and last.role == msg.role then
+                last.content = last.content .. "\n\n" .. msg.content
+            else
+                table.insert(merged, { role = msg.role, content = msg.content })
+            end
+        end
+        return merged
+    end
+
+    local function httpErrorText(resp)
+        local body = resp and (resp.Body or resp.body)
+        if type(body) == "string" and body ~= "" then
+            local ok, decoded = pcall(function()
+                return HttpService:JSONDecode(body)
+            end)
+            if ok and type(decoded) == "table" and decoded.error then
+                local detail = (type(decoded.error) == "table" and decoded.error.message) or decoded.error
+                return tostring(detail)
+            end
+        end
+        local code = resp and resp.StatusCode
+        return "HTTP request failed" .. (code and (" (status " .. tostring(code) .. ")") or "")
+    end
+
+    -- Returns replyText, nil on success or nil, errorMessage on failure
+    function Fn.callModel(model, messages)
+        if type(httpRequest) ~= "function" then
+            return nil, "This executor exposes no request/http_request function."
+        end
+        local provider = model.provider
+        local key = Settings.keys[provider] or ""
+        local url, headers, body
+
+        if provider == "Google DeepMind" then
+            url = "https://generativelanguage.googleapis.com/v1beta/models/" .. model.modelId .. ":generateContent"
+            if key ~= "" then
+                url = url .. "?key=" .. key
+            end
+            headers = { ["Content-Type"] = "application/json" }
+            local contents = {}
+            for _, msg in ipairs(mergeAlternating(messages)) do
+                table.insert(contents, {
+                    role = msg.role == "assistant" and "model" or "user",
+                    parts = { { text = msg.content } },
+                })
+            end
+            body = {
+                system_instruction = { parts = { { text = CONFIG.systemPrompt } } },
+                contents = contents,
+            }
+        elseif provider == "Anthropic" then
+            url = "https://api.anthropic.com/v1/messages"
+            headers = {
+                ["Content-Type"] = "application/json",
+                ["x-api-key"] = key,
+                ["anthropic-version"] = "2023-06-01",
+            }
+            body = {
+                model = model.modelId,
+                max_tokens = 2048,
+                system = CONFIG.systemPrompt,
+                messages = mergeAlternating(messages),
+            }
+        else -- OpenAI, and Custom (OpenAI-compatible)
+            url = (provider == "Custom" and model.baseUrl) or "https://api.openai.com/v1/chat/completions"
+            if provider == "Custom" and (url == nil or url == "") then
+                return nil, "This Custom model has no base URL. Edit it in Settings."
+            end
+            headers = { ["Content-Type"] = "application/json" }
+            if key ~= "" then
+                headers["Authorization"] = "Bearer " .. key
+            end
+            if provider == "Custom" and model.authHeader and model.authHeader ~= "" then
+                local headerName, headerValue = model.authHeader:match("^%s*([^:]+)%s*:%s*(.-)%s*$")
+                if headerName and headerName ~= "" then
+                    headers[headerName] = headerValue
+                end
+            end
+            local payload = { { role = "system", content = CONFIG.systemPrompt } }
+            for _, msg in ipairs(messages) do
+                table.insert(payload, { role = msg.role, content = msg.content })
+            end
+            body = { model = model.modelId, messages = payload }
+        end
+
+        local ok, resp = pcall(httpRequest, {
+            Url = url,
+            Method = "POST",
+            Headers = headers,
+            Body = HttpService:JSONEncode(body),
+        })
+        if not ok then
+            return nil, "Request failed: " .. tostring(resp)
+        end
+        if type(resp) == "table" and resp.Success == false then
+            return nil, httpErrorText(resp)
+        end
+        local raw = type(resp) == "table" and (resp.Body or resp.body) or resp
+        if type(raw) ~= "string" or raw == "" then
+            return nil, "Empty response body."
+        end
+
+        local decoded
+        local decodeOk = pcall(function()
+            decoded = HttpService:JSONDecode(raw)
+        end)
+        if not decodeOk or type(decoded) ~= "table" then
+            return nil, "Could not decode the API response."
+        end
+
+        local text = nil
+        if provider == "Google DeepMind" then
+            if decoded.error then
+                return nil, tostring(decoded.error.message or "Google API error")
+            end
+            local candidate = decoded.candidates and decoded.candidates[1]
+            if candidate and candidate.content and candidate.content.parts then
+                local chunks = {}
+                for _, part in ipairs(candidate.content.parts) do
+                    table.insert(chunks, tostring(part.text or ""))
+                end
+                text = table.concat(chunks)
+            end
+        elseif provider == "Anthropic" then
+            if decoded.error then
+                return nil, tostring(decoded.error.message or "Anthropic API error")
+            end
+            if type(decoded.content) == "table" then
+                local chunks = {}
+                for _, part in ipairs(decoded.content) do
+                    if part.type == "text" then
+                        table.insert(chunks, tostring(part.text or ""))
+                    end
+                end
+                text = table.concat(chunks)
+            end
+        else -- OpenAI-style
+            if decoded.error then
+                return nil, tostring((type(decoded.error) == "table" and decoded.error.message) or "OpenAI-style API error")
+            end
+            local choice = decoded.choices and decoded.choices[1]
+            if choice and choice.message then
+                text = tostring(choice.message.content or "")
+            end
+        end
+
+        if text and text ~= "" then
+            return text
+        end
+        return nil, "The API returned no reply text."
+    end
+end
+
+-- ===========================================================================
+-- 8. SIDEBAR (logo, New Chat, saved chats, Settings button)
+-- ===========================================================================
+do
+    UI.sidebar = create("Frame", {
+        Name = "Sidebar",
+        Size = UDim2.new(0, CONFIG.sidebarWidth, 1, 0),
+        BackgroundColor3 = Theme.current.Surface,
+        Parent = UI.root,
+    })
+    bindTheme(UI.sidebar, "BackgroundColor3", "Surface")
+
+    UI.sidebarContent = create("Frame", {
+        Name = "SidebarContent",
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Parent = UI.sidebar,
+    })
+
+    -- Header: C logo + name
+    local logo = makeLogo(38, UI.sidebarContent)
+    logo.Position = UDim2.fromOffset(14, 13)
+    makeLabel({
+        Position = UDim2.fromOffset(62, 12),
+        Size = UDim2.new(1, -70, 0, 22),
+        Font = Enum.Font.GothamBold,
+        TextSize = 17,
+        Text = "Cinis AI",
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = UI.sidebarContent,
+    })
+    makeLabel({
+        Position = UDim2.fromOffset(62, 34),
+        Size = UDim2.new(1, -70, 0, 14),
+        Font = Enum.Font.Gotham,
+        TextSize = 11,
+        Text = "AI Chat",
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = UI.sidebarContent,
+    }, "TextDim")
+
+    local function navButton(yPos, iconId, text)
+        local btn = create("TextButton", {
+            Position = UDim2.new(0, 12, 0, yPos),
+            Size = UDim2.new(1, -24, 0, 38),
+            BackgroundColor3 = Theme.current.SurfaceAlt,
+            Text = "",
+            AutoButtonColor = true,
+            Parent = UI.sidebarContent,
+        })
+        bindTheme(btn, "BackgroundColor3", "SurfaceAlt")
+        corner(btn, 10)
+        stroke(btn, "Stroke", 1, 0.6)
+        local icon = iconButton(btn, 18, iconId)
+        icon.Position = UDim2.fromOffset(12, 10)
+        makeLabel({
+            Position = UDim2.fromOffset(40, 0),
+            Size = UDim2.new(1, -48, 1, 0),
+            Font = Enum.Font.GothamMedium,
+            TextSize = 13,
+            Text = text,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent = btn,
+        })
+        return btn
+    end
+
+    local newChatBtn = navButton(70, ICONS.plus, "New Chat")
+    on(newChatBtn.Activated, function()
+        Fn.newChat()
+    end)
+
+    local chatList = create("ScrollingFrame", {
+        Name = "ChatList",
+        Position = UDim2.new(0, 8, 0, 118),
+        Size = UDim2.new(1, -16, 1, -170),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        CanvasSize = UDim2.new(),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        ScrollBarThickness = 3,
+        ScrollBarImageTransparency = 0.35,
+        Parent = UI.sidebarContent,
+    })
+    bindTheme(chatList, "ScrollBarImageColor3", "Stroke")
+    create("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = chatList })
+    local emptyLabel = makeLabel({
+        Size = UDim2.new(1, -8, 0, 30),
+        Font = Enum.Font.Gotham,
+        TextSize = 12,
+        Text = "No saved chats yet",
+        TextXAlignment = Enum.TextXAlignment.Center,
+        Parent = chatList,
+    }, "TextDim")
+
+    local settingsBtn = create("TextButton", {
+        AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0, 12, 1, -12),
+        Size = UDim2.new(1, -24, 0, 38),
+        BackgroundColor3 = Theme.current.SurfaceAlt,
+        Text = "",
+        AutoButtonColor = true,
+        Parent = UI.sidebarContent,
+    })
+    bindTheme(settingsBtn, "BackgroundColor3", "SurfaceAlt")
+    corner(settingsBtn, 10)
+    stroke(settingsBtn, "Stroke", 1, 0.6)
+    local settingsIcon = iconButton(settingsBtn, 18, ICONS.settings)
+    settingsIcon.Position = UDim2.fromOffset(12, 10)
+    makeLabel({
+        Position = UDim2.fromOffset(40, 0),
+        Size = UDim2.new(1, -48, 1, 0),
+        Font = Enum.Font.GothamMedium,
+        TextSize = 13,
+        Text = "Settings",
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = settingsBtn,
+    })
+    on(settingsBtn.Activated, function()
+        Fn.openSettings()
+    end)
+
+    -- Rebuild the saved-chat list (called after any chat change)
+    function Fn.refreshChatList()
+        for _, child in ipairs(chatList:GetChildren()) do
+            if child:IsA("TextButton") then
+                child:Destroy()
+            end
+        end
+        emptyLabel.Visible = #Chats == 0
+        for index, chat in ipairs(Chats) do
+            local isActive = Session.activeChat ~= nil and Session.activeChat.uid == chat.uid
+            local row = create("TextButton", {
+                Size = UDim2.new(1, -8, 0, 34),
+                BackgroundColor3 = Theme.current.SurfaceAlt,
+                BackgroundTransparency = isActive and 0 or 1,
+                Text = "",
+                AutoButtonColor = not isActive,
+                LayoutOrder = index,
+                Parent = chatList,
+            })
+            bindTheme(row, "BackgroundColor3", "SurfaceAlt")
+            corner(row, 8)
+            if isActive then
+                stroke(row, "Accent", 1, 0.2)
+            end
+            makeLabel({
+                Position = UDim2.fromOffset(10, 0),
+                Size = UDim2.new(1, -44, 1, 0),
+                Font = Enum.Font.GothamMedium,
+                TextSize = 12,
+                Text = chat.title,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                Parent = row,
+            })
+            local deleteBtn = iconButton(row, 18, ICONS.trash)
+            deleteBtn.AnchorPoint = Vector2.new(1, 0.5)
+            deleteBtn.Position = UDim2.new(1, -8, 0.5, 0)
+            on(deleteBtn.Activated, function()
+                for i, saved in ipairs(Chats) do
+                    if saved.uid == chat.uid then
+                        table.remove(Chats, i)
+                        break
+                    end
+                end
+                if Session.activeChat and Session.activeChat.uid == chat.uid then
+                    Fn.newChat()
+                else
+                    saveChats()
+                    Fn.refreshChatList()
+                end
+            end)
+            on(row.Activated, function()
+                Fn.openChat(chat)
+            end)
+        end
+    end
+end
+
+-- ===========================================================================
+-- 9. MAIN CHAT (header with model dropdown, message list, typing, input)
+-- ===========================================================================
+do
+    local chatArea = create("Frame", {
+        Name = "ChatArea",
+        Position = UDim2.new(0, CONFIG.sidebarWidth + 10, 0, 10),
+        Size = UDim2.new(1, -(CONFIG.sidebarWidth + 20), 1, -20),
+        BackgroundColor3 = Theme.current.Background,
+        Parent = UI.root,
+    })
+    bindTheme(chatArea, "BackgroundColor3", "Background")
+
+    -- ---------- Header ----------
+    local header = create("Frame", {
+        Name = "Header",
+        Size = UDim2.new(1, 0, 0, 52),
+        BackgroundTransparency = 1,
+        Parent = chatArea,
+    })
+
+    local collapseBtn = iconButton(header, 22, ICONS.sidebarClose)
+    collapseBtn.Position = UDim2.fromOffset(12, 15)
+
+    -- Drag handle (mouse + touch) doubles as the title zone
+    local headerDrag = create("TextButton", {
+        Name = "DragZone",
+        BackgroundTransparency = 1,
+        Text = "",
+        AutoButtonColor = false,
+        Position = UDim2.fromOffset(42, 0),
+        Size = UDim2.new(1, -322, 1, 0),
+        Parent = header,
+    })
+    local headerTitle = makeLabel({
+        Position = UDim2.fromOffset(8, 0),
+        Size = UDim2.new(1, -16, 1, 0),
+        Font = Enum.Font.GothamBold,
+        TextSize = 14,
+        Text = "New Chat",
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Parent = headerDrag,
+    })
+
+    local modelBtn = create("TextButton", {
+        Name = "ModelButton",
+        Position = UDim2.new(1, -270, 0, 11),
+        Size = UDim2.fromOffset(200, 30),
+        BackgroundColor3 = Theme.current.SurfaceAlt,
+        Text = "",
+        AutoButtonColor = true,
+        Parent = header,
+    })
+    bindTheme(modelBtn, "BackgroundColor3", "SurfaceAlt")
+    corner(modelBtn, 8)
+    stroke(modelBtn, "Stroke", 1, 0.6)
+    local modelLabel = makeLabel({
+        Position = UDim2.fromOffset(10, 0),
+        Size = UDim2.new(1, -32, 1, 0),
+        Font = Enum.Font.GothamMedium,
+        TextSize = 12,
+        Text = "No model selected",
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Parent = modelBtn,
+    }, "TextDim")
+    local chevron = iconLabel(modelBtn, 16, ICONS.chevronDown)
+    chevron.AnchorPoint = Vector2.new(1, 0.5)
+    chevron.Position = UDim2.new(1, -7, 0.5, 0)
+
+    local minimizeBtn = iconButton(header, 22, ICONS.minimize)
+    minimizeBtn.AnchorPoint = Vector2.new(1, 0)
+    minimizeBtn.Position = UDim2.new(1, -40, 0, 15)
+
+    local closeBtn = iconButton(header, 22, ICONS.close)
+    closeBtn.AnchorPoint = Vector2.new(1, 0)
+    closeBtn.Position = UDim2.new(1, -12, 0, 15)
+
+    -- ---------- Message list ----------
+    local chatScroll = create("ScrollingFrame", {
+        Name = "Messages",
+        Position = UDim2.fromOffset(0, 52),
+        Size = UDim2.new(1, 0, 1, -114),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        CanvasSize = UDim2.new(),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        ScrollBarThickness = 4,
+        ScrollBarImageTransparency = 0.35,
+        Parent = chatArea,
+    })
+    bindTheme(chatScroll, "ScrollBarImageColor3", "Stroke")
+    create("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder, VerticalAlignment = Enum.VerticalAlignment.Bottom, Parent = chatScroll })
+    create("UIPadding", {
+        PaddingLeft = UDim.new(0, 14),
+        PaddingRight = UDim.new(0, 14),
+        PaddingTop = UDim.new(0, 10),
+        PaddingBottom = UDim.new(0, 10),
+        Parent = chatScroll,
+    })
+
+    -- Welcome hint shown when there is no active conversation
+    local welcome = create("Frame", {
+        Name = "Welcome",
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Parent = chatArea,
+    })
+    local welcomeLogo = makeLogo(52, welcome)
+    welcomeLogo.Position = UDim2.new(0.5, -26, 0.42, -26)
+    makeLabel({
+        Position = UDim2.new(0.5, -200, 0.42, 38),
+        Size = UDim2.fromOffset(400, 22),
+        Font = Enum.Font.GothamBold,
+        TextSize = 17,
+        Text = "Welcome to Cinis AI",
+        TextXAlignment = Enum.TextXAlignment.Center,
+        Parent = welcome,
+    })
+    makeLabel({
+        Position = UDim2.new(0.5, -240, 0.42, 64),
+        Size = UDim2.fromOffset(480, 16),
+        Font = Enum.Font.Gotham,
+        TextSize = 12,
+        Text = "Pick a model in the header, then say hello.",
+        TextXAlignment = Enum.TextXAlignment.Center,
+        Parent = welcome,
+    }, "TextDim")
+
+    -- ---------- Input bar ----------
+    local inputBar = create("Frame", {
+        Name = "InputBar",
+        AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.fromScale(0, 1),
+        Size = UDim2.new(1, 0, 0, 62),
+        BackgroundTransparency = 1,
+        Parent = chatArea,
+    })
+    local inputBox = create("TextBox", {
+        Name = "Input",
+        Position = UDim2.fromOffset(14, 10),
+        Size = UDim2.new(1, -76, 0, 42),
+        BackgroundColor3 = Theme.current.InputBg,
+        Text = "",
+        PlaceholderText = "Message Cinis AI...",
+        Font = Enum.Font.Gotham,
+        TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ClearTextOnFocus = false,
+        ClipsDescendants = true,
+        Parent = inputBar,
+    })
+    bindTheme(inputBox, "BackgroundColor3", "InputBg")
+    bindTheme(inputBox, "TextColor3", "Text")
+    bindTheme(inputBox, "PlaceholderColor3", "TextDim")
+    corner(inputBox, 12)
+    stroke(inputBox, "Stroke", 1, 0.6)
+    create("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12), Parent = inputBox })
+
+    local sendBtn = create("ImageButton", {
+        Name = "Send",
+        AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -14, 0.5, 0),
+        Size = UDim2.fromOffset(42, 42),
+        BackgroundColor3 = Theme.current.Accent,
+        Image = ICONS.send,
+        ImageColor3 = Color3.fromRGB(255, 255, 255),
+        AutoButtonColor = true,
+        Parent = inputBar,
+    })
+    bindTheme(sendBtn, "BackgroundColor3", "Accent")
+    corner(sendBtn, 12)
+
+    -- ---------- Message rendering ----------
+    local messageOrder = 0
+
+    local function scrollToBottom()
+        task.delay(0.05, function()
+            if not Session.shutdown then
+                chatScroll.CanvasPosition = Vector2.new(0, 1e6)
+            end
+        end)
+    end
+
+    local function renderMessage(role, content)
+        messageOrder = messageOrder + 1
+        local row = create("Frame", {
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            LayoutOrder = messageOrder,
+            Parent = chatScroll,
+        })
+        local isUser = role == "user"
+        local isError = role == "error"
+        local bubble = create("Frame", {
+            AutomaticSize = Enum.AutomaticSize.Y,
+            Size = UDim2.new(0.78, 0, 0, 0),
+            BackgroundColor3 = Theme.current[isError and "Error" or (isUser and "AccentSoft" or "BubbleAI")],
+            Parent = row,
+        })
+        bindTheme(bubble, "BackgroundColor3", isError and "Error" or (isUser and "AccentSoft" or "BubbleAI"))
+        corner(bubble, 12)
+        stroke(bubble, isError and "ErrorText" or "Stroke", 1, isError and 0.5 or 0.75)
+        create("UIPadding", {
+            PaddingLeft = UDim.new(0, 12),
+            PaddingRight = UDim.new(0, 12),
+            PaddingTop = UDim.new(0, 9),
+            PaddingBottom = UDim.new(0, 9),
+            Parent = bubble,
+        })
+        makeLabel({
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            Font = Enum.Font.Gotham,
+            TextSize = 14,
+            Text = content,
+            TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent = bubble,
+        }, isError and "ErrorText" or "Text")
+
+        if isUser then
+            bubble.AnchorPoint = Vector2.new(1, 0)
+            bubble.Position = UDim2.new(1, 0, 0, 0)
+        elseif isError then
+            bubble.Position = UDim2.fromOffset(0, 0)
+        else -- assistant bubble gets the C logo avatar
+            local avatar = makeLogo(24, row)
+            avatar.Position = UDim2.fromOffset(0, 2)
+            bubble.Position = UDim2.fromOffset(32, 0)
+        end
+    end
+
+    -- ---------- Typing indicator ----------
+    local typingRow, typingDots = nil, {}
+
+    local function setTyping(visible)
+        if visible == (typingRow ~= nil) then
+            return
+        end
+        if visible then
+            typingRow = create("Frame", {
+                BackgroundTransparency = 1,
+                Size = UDim2.new(1, 0, 0, 0),
+                AutomaticSize = Enum.AutomaticSize.Y,
+                LayoutOrder = 1000000,
+                Parent = chatScroll,
+            })
+            local avatar = makeLogo(24, typingRow)
+            avatar.Position = UDim2.fromOffset(0, 2)
+            local bubble = create("Frame", {
+                Size = UDim2.fromOffset(84, 32),
+                BackgroundColor3 = Theme.current.BubbleAI,
+                Position = UDim2.fromOffset(32, 0),
+                Parent = typingRow,
+            })
+            bindTheme(bubble, "BackgroundColor3", "BubbleAI")
+            corner(bubble, 12)
+            stroke(bubble, "Stroke", 1, 0.75)
+            typingDots = {}
+            for i = 1, 3 do
+                local dot = create("Frame", {
+                    Size = UDim2.fromOffset(5, 5),
+                    Position = UDim2.new(0, 10 + (i - 1) * 14, 0.5, -2.5),
+                    BackgroundColor3 = Theme.current.TextDim,
+                    Parent = bubble,
+                })
+                bindTheme(dot, "BackgroundColor3", "TextDim")
+                corner(dot, 3)
+                typingDots[i] = dot
+            end
+            task.spawn(function()
+                while not Session.shutdown and typingRow and typingRow.Parent do
+                    local phase = math.floor(os.clock() * 3)
+                    for i, dot in ipairs(typingDots) do
+                        local active = (phase + i) % 3 == 0
+                        dot.Size = UDim2.fromOffset(active and 7 or 5, active and 7 or 5)
+                        dot.Position = UDim2.new(0, 9 + (i - 1) * 14, 0.5, active and -3.5 or -2.5)
+                    end
+                    task.wait(0.12)
+                end
+            end)
+            scrollToBottom()
+        else
+            if typingRow then
+                typingRow:Destroy()
+            end
+            typingRow = nil
+            typingDots = {}
+        end
+    end
+
+    local function clearMessages()
+        for _, child in ipairs(chatScroll:GetChildren()) do
+            if child:IsA("Frame") then
+                child:Destroy()
+            end
+        end
+        messageOrder = 0
+        typingRow = nil
+        typingDots = {}
+    end
+
+    -- ---------- Chat state actions ----------
+    function Fn.newChat()
+        Session.activeChat = nil
+        Settings.lastChat = nil
+        saveSettings()
+        saveChats()
+        clearMessages()
+        welcome.Visible = true
+        headerTitle.Text = "New Chat"
+        Fn.refreshChatList()
+    end
+
+    function Fn.openChat(chat)
+        Fn.closePopup()
+        Session.activeChat = chat
+        Settings.lastChat = chat and chat.uid or nil
+        saveSettings()
+        clearMessages()
+        welcome.Visible = #chat.messages == 0
+        for _, msg in ipairs(chat.messages) do
+            renderMessage(msg.role, msg.content)
+        end
+        headerTitle.Text = chat.title
+        Fn.refreshChatList()
+        if Session.pendingChatUid == chat.uid then
+            setTyping(true)
+        end
+        scrollToBottom()
+    end
+
+    local function updateModelHeader()
+        local model = getActiveModel()
+        modelLabel.Text = model and model.name or "No model selected"
+        modelLabel.TextColor3 = model and Theme.current.Text or Theme.current.TextDim
+    end
+    function Fn.updateModelHeader()
+        updateModelHeader()
+    end
+    onTheme(updateModelHeader)
+
+    on(modelBtn.Activated, function()
+        local items = {}
+        for _, model in ipairs(Settings.models) do
+            table.insert(items, { id = model.uid, label = model.name, sub = model.provider })
+        end
+        if #items == 0 then
+            table.insert(items, { id = "__none", label = "No models yet - add one in Settings" })
+        end
+        Fn.openDropdown(modelBtn, 240, items, function(id)
+            if id == "__none" then
+                return
+            end
+            Settings.activeModel = id
+            saveSettings()
+            updateModelHeader()
+        end, Settings.activeModel)
+    end)
+
+    -- ---------- Sidebar collapse / window layout ----------
+    local function layoutWindow(animate)
+        local collapsed = Settings.sidebarCollapsed
+        local info = TweenInfo.new(animate and 0.22 or 0, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        UI.sidebarContent.Visible = not collapsed
+        TweenService:Create(UI.sidebar, info, {
+            Size = collapsed and UDim2.new(0, 0, 1, 0) or UDim2.new(0, CONFIG.sidebarWidth, 1, 0),
+        }):Play()
+        TweenService:Create(chatArea, info, {
+            Position = collapsed and UDim2.new(0, 10, 0, 10) or UDim2.new(0, CONFIG.sidebarWidth + 10, 0, 10),
+            Size = collapsed and UDim2.new(1, -20, 1, -20) or UDim2.new(1, -(CONFIG.sidebarWidth + 20), 1, -20),
+        }):Play()
+        collapseBtn.Image = collapsed and ICONS.sidebarOpen or ICONS.sidebarClose
+    end
+    function Fn.layoutWindow(animate)
+        layoutWindow(animate)
+    end
+
+    on(collapseBtn.Activated, function()
+        Settings.sidebarCollapsed = not Settings.sidebarCollapsed
+        saveSettings()
+        layoutWindow(true)
+    end)
+
+    -- ---------- Window dragging (mouse + touch) ----------
+    local dragStart, dragOrigin = nil, nil
+    on(headerDrag.InputBegan, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragStart = input.Position
+            dragOrigin = UI.root.Position
+        end
+    end)
+    on(UserInputService.InputChanged, function(input)
+        if dragStart and dragOrigin
+            and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            UI.root.Position = UDim2.new(
+                dragOrigin.X.Scale, dragOrigin.X.Offset + delta.X,
+                dragOrigin.Y.Scale, dragOrigin.Y.Offset + delta.Y
+            )
+        end
+    end)
+    on(UserInputService.InputEnded, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragStart = nil
+            dragOrigin = nil
+        end
+    end)
+
+    on(minimizeBtn.Activated, Fn.minimize)
+    on(closeBtn.Activated, Fn.shutdown)
+
+    -- ---------- Sending messages ----------
+    local pending = false
+
+    local function setPending(value)
+        pending = value
+        sendBtn.ImageTransparency = value and 0.55 or 0
+        sendBtn.AutoButtonColor = not value
+    end
+
+    local function buildHistory()
+        local messages = {}
+        if Session.activeChat then
+            for _, msg in ipairs(Session.activeChat.messages) do
+                if msg.role == "user" or msg.role == "assistant" then
+                    table.insert(messages, { role = msg.role, content = msg.content })
+                end
+            end
+        end
+        if #messages > CONFIG.historyLimit then
+            local trimmed = {}
+            for i = #messages - CONFIG.historyLimit + 1, #messages do
+                table.insert(trimmed, messages[i])
+            end
+            messages = trimmed
+        end
+        return messages
+    end
+
+    local function sendMessage()
+        if pending then
+            return
+        end
+        local text = (inputBox.Text or ""):match("^%s*(.-)%s*$")
+        if text == "" then
+            return
+        end
+        local model = getActiveModel()
+        if not model then
+            welcome.Visible = false
+            renderMessage("error", "No model selected. Add one from the model menu or Settings first.")
+            scrollToBottom()
+            return
+        end
+
+        local chat = Session.activeChat
+        if not chat then
+            chat = {
+                uid = HttpService:GenerateGUID(false),
+                title = #text > 32 and (text:sub(1, 32) .. "...") or text,
+                messages = {},
+            }
+            table.insert(Chats, 1, chat)
+            Session.activeChat = chat
+            Settings.lastChat = chat.uid
+            saveSettings()
+        end
+
+        table.insert(chat.messages, { role = "user", content = text })
+        welcome.Visible = false
+        renderMessage("user", text)
+        inputBox.Text = ""
+        saveChats()
+        Fn.refreshChatList()
+        scrollToBottom()
+
+        setPending(true)
+        Session.pendingChatUid = chat.uid
+        setTyping(true)
+        task.spawn(function()
+            local reply, err = Fn.callModel(model, buildHistory())
+            if Session.shutdown then
+                return
+            end
+            setPending(false)
+            setTyping(false)
+            Session.pendingChatUid = nil
+            if reply then
+                table.insert(chat.messages, { role = "assistant", content = reply })
+            else
+                table.insert(chat.messages, { role = "error", content = tostring(err) })
+            end
+            saveChats()
+            if Session.activeChat == chat then
+                renderMessage(reply and "assistant" or "error", reply or err)
+                scrollToBottom()
+            end
+        end)
+    end
+
+    on(sendBtn.Activated, sendMessage)
+    on(inputBox.FocusLost, function(enterPressed)
+        if enterPressed then
+            task.defer(function()
+                if not Session.shutdown then
+                    sendMessage()
+                    pcall(function()
+                        inputBox:CaptureFocus()
+                    end)
+                end
+            end)
+        end
+    end)
+end
+
+-- ===========================================================================
+-- 10. SETTINGS OVERLAY (theme toggle, API keys, custom models manager)
+-- ===========================================================================
+do
+    local overlay = create("Frame", {
+        Name = "SettingsOverlay",
+        Visible = false,
+        Size = UDim2.fromScale(1, 1),
+        BackgroundColor3 = Color3.fromRGB(0, 0, 0),
+        BackgroundTransparency = 0.45,
+        Parent = UI.root,
+    })
+
+    function Fn.closeSettings()
+        overlay.Visible = false
+        Fn.closePopup()
+    end
+
+    function Fn.openSettings()
+        Fn.closePopup()
+        overlay.Visible = true
+    end
+
+    local backdrop = create("TextButton", {
+        Text = "",
+        AutoButtonColor = false,
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        Parent = overlay,
+    })
+    on(backdrop.Activated, Fn.closeSettings)
+
+    local panel = create("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.new(0, 460, 1, -36),
+        BackgroundColor3 = Theme.current.Surface,
+        Parent = overlay,
+    })
+    bindTheme(panel, "BackgroundColor3", "Surface")
+    corner(panel, 14)
+    stroke(panel, "Stroke", 1, 0.35)
+
+    makeLabel({
+        Position = UDim2.fromOffset(16, 12),
+        Size = UDim2.new(1, -60, 0, 24),
+        Font = Enum.Font.GothamBold,
+        TextSize = 16,
+        Text = "Settings",
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = panel,
+    })
+    local closePanelBtn = iconButton(panel, 22, ICONS.close)
+    closePanelBtn.AnchorPoint = Vector2.new(1, 0)
+    closePanelBtn.Position = UDim2.new(1, -14, 0, 13)
+    on(closePanelBtn.Activated, Fn.closeSettings)
+
+    local content = create("ScrollingFrame", {
+        Position = UDim2.fromOffset(12, 46),
+        Size = UDim2.new(1, -24, 1, -58),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        CanvasSize = UDim2.new(),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        ScrollBarThickness = 4,
+        ScrollBarImageTransparency = 0.35,
+        Parent = panel,
+    })
+    bindTheme(content, "ScrollBarImageColor3", "Stroke")
+    create("UIListLayout", { Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder, Parent = content })
+
+    local function sectionTitle(text, order)
+        return makeLabel({
+            Size = UDim2.new(1, 0, 0, 16),
+            Font = Enum.Font.GothamMedium,
+            TextSize = 11,
+            Text = string.upper(text),
+            TextXAlignment = Enum.TextXAlignment.Left,
+            LayoutOrder = order,
+            Parent = content,
+        }, "TextDim")
+    end
+
+    local function card(order)
+        local c = create("Frame", {
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundColor3 = Theme.current.SurfaceAlt,
+            LayoutOrder = order,
+            Parent = content,
+        })
+        bindTheme(c, "BackgroundColor3", "SurfaceAlt")
+        corner(c, 12)
+        stroke(c, "Stroke", 1, 0.7)
+        create("UIPadding", {
+            PaddingLeft = UDim.new(0, 12),
+            PaddingRight = UDim.new(0, 12),
+            PaddingTop = UDim.new(0, 10),
+            PaddingBottom = UDim.new(0, 12),
+            Parent = c,
+        })
+        create("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder, Parent = c })
+        return c
+    end
+
+    local function fieldBox(parent, order, placeholder)
+        local box = create("TextBox", {
+            Size = UDim2.new(1, 0, 0, 30),
+            BackgroundColor3 = Theme.current.InputBg,
+            Text = "",
+            PlaceholderText = placeholder,
+            Font = Enum.Font.Gotham,
+            TextSize = 12,
+            ClearTextOnFocus = false,
+            LayoutOrder = order,
+            Parent = parent,
+        })
+        bindTheme(box, "BackgroundColor3", "InputBg")
+        bindTheme(box, "TextColor3", "Text")
+        bindTheme(box, "PlaceholderColor3", "TextDim")
+        corner(box, 8)
+        stroke(box, "Stroke", 1, 0.7)
+        create("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), Parent = box })
+        return box
+    end
+
+    -- ---------- Appearance / theme toggle ----------
+    sectionTitle("Appearance", 1)
+    local appearanceCard = card(2)
+    local themeRow = create("Frame", {
+        Size = UDim2.new(1, 0, 0, 32),
+        BackgroundTransparency = 1,
+        LayoutOrder = 1,
+        Parent = appearanceCard,
+    })
+    makeLabel({
+        Size = UDim2.new(0, 200, 1, 0),
+        Font = Enum.Font.GothamMedium,
+        TextSize = 13,
+        Text = "Theme",
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = themeRow,
+    })
+    local themeToggle = create("TextButton", {
+        AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, 0, 0.5, 0),
+        Size = UDim2.fromOffset(180, 30),
+        BackgroundColor3 = Theme.current.InputBg,
+        Text = "",
+        AutoButtonColor = true,
+        Parent = themeRow,
+    })
+    bindTheme(themeToggle, "BackgroundColor3", "InputBg")
+    corner(themeToggle, 8)
+    stroke(themeToggle, "Stroke", 1, 0.6)
+    local themeIcon = iconButton(themeToggle, 16, ICONS.moon)
+    themeIcon.Position = UDim2.fromOffset(9, 7)
+    local themeNameLabel = makeLabel({
+        Position = UDim2.fromOffset(32, 0),
+        Size = UDim2.new(1, -40, 1, 0),
+        Font = Enum.Font.GothamMedium,
+        TextSize = 12,
+        Text = "Moonlight",
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = themeToggle,
+    })
+    local function refreshThemeToggle()
+        local dark = Theme.name == "Moonlight"
+        themeIcon.Image = dark and ICONS.moon or ICONS.sun
+        themeNameLabel.Text = dark and "Moonlight" or "Sunset"
+    end
+    onTheme(refreshThemeToggle)
+    on(themeToggle.Activated, function()
+        Fn.applyTheme(Theme.name == "Moonlight" and "Sunset" or "Moonlight")
+    end)
+
+    -- ---------- API keys (masked on screen, saved locally) ----------
+    sectionTitle("API Keys", 3)
+    local keysCard = card(4)
+    local function maskKey(key)
+        if type(key) ~= "string" or key == "" then
+            return ""
+        end
+        return string.rep("*", math.min(#key, 26))
+    end
+    for index, provider in ipairs(CONFIG.providers) do
+        local row = create("Frame", {
+            Size = UDim2.new(1, 0, 0, 32),
+            BackgroundTransparency = 1,
+            LayoutOrder = index,
+            Parent = keysCard,
+        })
+        makeLabel({
+            Size = UDim2.new(0, 130, 1, 0),
+            Font = Enum.Font.GothamMedium,
+            TextSize = 12,
+            Text = provider,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            Parent = row,
+        })
+        local box = create("TextBox", {
+            AnchorPoint = Vector2.new(1, 0.5),
+            Position = UDim2.new(1, 0, 0.5, 0),
+            Size = UDim2.new(1, -140, 0, 28),
+            BackgroundColor3 = Theme.current.InputBg,
+            Text = maskKey(Settings.keys[provider]),
+            PlaceholderText = "Paste " .. provider .. " API key",
+            Font = Enum.Font.Gotham,
+            TextSize = 12,
+            ClearTextOnFocus = false,
+            Parent = row,
+        })
+        bindTheme(box, "BackgroundColor3", "InputBg")
+        bindTheme(box, "TextColor3", "Text")
+        bindTheme(box, "PlaceholderColor3", "TextDim")
+        corner(box, 8)
+        stroke(box, "Stroke", 1, 0.7)
+        create("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), Parent = box })
+        on(box.Focused, function()
+            box.Text = Settings.keys[provider] or ""
+        end)
+        on(box.FocusLost, function()
+            Settings.keys[provider] = box.Text or ""
+            box.Text = maskKey(Settings.keys[provider])
+            saveSettings()
+        end)
+    end
+
+    -- ---------- Custom models manager ----------
+    sectionTitle("Models", 5)
+    local modelsCard = card(6)
+    makeLabel({
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        Font = Enum.Font.Gotham,
+        TextSize = 11,
+        Text = "Add models yourself (display name, model ID, provider). Custom models also need an OpenAI-compatible base URL.",
+        TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = 1,
+        Parent = modelsCard,
+    }, "TextDim")
+
+    local editingUid = nil
+    local formProvider = "OpenAI"
+
+    local nameBox = fieldBox(modelsCard, 2, "Display name (e.g. GPT-4o mini)")
+    local idBox = fieldBox(modelsCard, 3, "Model ID (e.g. gpt-4o-mini)")
+
+    local providerRow = create("Frame", {
+        Size = UDim2.new(1, 0, 0, 30),
+        BackgroundTransparency = 1,
+        LayoutOrder = 4,
+        Parent = modelsCard,
+    })
+    local providerBtn = create("TextButton", {
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundColor3 = Theme.current.InputBg,
+        Text = "",
+        AutoButtonColor = true,
+        Parent = providerRow,
+    })
+    bindTheme(providerBtn, "BackgroundColor3", "InputBg")
+    corner(providerBtn, 8)
+    stroke(providerBtn, "Stroke", 1, 0.7)
+    local providerLabel = makeLabel({
+        Position = UDim2.fromOffset(8, 0),
+        Size = UDim2.new(1, -30, 1, 0),
+        Font = Enum.Font.GothamMedium,
+        TextSize = 12,
+        Text = "OpenAI",
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = providerBtn,
+    })
+    local providerChevron = iconLabel(providerBtn, 14, ICONS.chevronDown)
+    providerChevron.AnchorPoint = Vector2.new(1, 0.5)
+    providerChevron.Position = UDim2.new(1, -8, 0.5, 0)
+
+    local baseUrlBox = fieldBox(modelsCard, 5, "Base URL - Custom provider only")
+    local authBox = fieldBox(modelsCard, 6, "Auth header - Custom provider only")
+
+    local function setCustomFieldsEnabled(enabled)
+        baseUrlBox.Text = enabled and baseUrlBox.Text or ""
+        authBox.Text = enabled and authBox.Text or ""
+        baseUrlBox.PlaceholderText = enabled and "Base URL, OpenAI-compatible (required)" or "Base URL - Custom provider only"
+        authBox.PlaceholderText = enabled and "Auth header, e.g. x-api-key: value (optional)" or "Auth header - Custom provider only"
+        baseUrlBox.TextTransparency = enabled and 0 or 0.5
+        authBox.TextTransparency = enabled and 0 or 0.5
+    end
+
+    on(providerBtn.Activated, function()
+        local items = {}
+        for _, provider in ipairs(CONFIG.providers) do
+            table.insert(items, { id = provider, label = provider })
+        end
+        Fn.openDropdown(providerBtn, 240, items, function(id)
+            formProvider = id
+            providerLabel.Text = id
+            setCustomFieldsEnabled(id == "Custom")
+        end, formProvider)
+    end)
+
+    local formButtons = create("Frame", {
+        Size = UDim2.new(1, 0, 0, 32),
+        BackgroundTransparency = 1,
+        LayoutOrder = 7,
+        Parent = modelsCard,
+    })
+    local saveModelBtn = create("TextButton", {
+        Size = UDim2.fromOffset(130, 32),
+        BackgroundColor3 = Theme.current.Accent,
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        Text = "Add Model",
+        AutoButtonColor = true,
+        Parent = formButtons,
+    })
+    bindTheme(saveModelBtn, "BackgroundColor3", "Accent")
+    bindTheme(saveModelBtn, "TextColor3", "OnAccent")
+    corner(saveModelBtn, 8)
+    local cancelEditBtn = create("TextButton", {
+        Position = UDim2.fromOffset(140, 0),
+        Size = UDim2.fromOffset(70, 32),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 12,
+        Text = "Cancel",
+        AutoButtonColor = false,
+        Visible = false,
+        Parent = formButtons,
+    })
+    bindTheme(cancelEditBtn, "TextColor3", "TextDim")
+    local formError = makeLabel({
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        Font = Enum.Font.Gotham,
+        TextSize = 12,
+        Text = "",
+        TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Visible = false,
+        LayoutOrder = 8,
+        Parent = modelsCard,
+    }, "ErrorText")
+
+    local modelList = create("Frame", {
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1,
+        LayoutOrder = 9,
+        Parent = modelsCard,
+    })
+    create("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = modelList })
+
+    local function clearForm()
+        editingUid = nil
+        nameBox.Text = ""
+        idBox.Text = ""
+        formProvider = "OpenAI"
+        providerLabel.Text = "OpenAI"
+        baseUrlBox.Text = ""
+        authBox.Text = ""
+        setCustomFieldsEnabled(false)
+        saveModelBtn.Text = "Add Model"
+        cancelEditBtn.Visible = false
+        formError.Visible = false
+    end
+
+    local function refreshModelRows()
+        for _, child in ipairs(modelList:GetChildren()) do
+            if child:IsA("Frame") then
+                child:Destroy()
+            end
+        end
+        if #Settings.models == 0 then
+            makeLabel({
+                Size = UDim2.new(1, 0, 0, 18),
+                Font = Enum.Font.Gotham,
+                TextSize = 11,
+                Text = "No models yet - add one above.",
+                TextXAlignment = Enum.TextXAlignment.Left,
+                Parent = modelList,
+            }, "TextDim")
+            return
+        end
+        for index, model in ipairs(Settings.models) do
+            local row = create("Frame", {
+                Size = UDim2.new(1, 0, 0, 38),
+                BackgroundColor3 = Theme.current.InputBg,
+                LayoutOrder = index,
+                Parent = modelList,
+            })
+            bindTheme(row, "BackgroundColor3", "InputBg")
+            corner(row, 8)
+            makeLabel({
+                Position = UDim2.fromOffset(10, 4),
+                Size = UDim2.new(1, -70, 0, 15),
+                Font = Enum.Font.GothamMedium,
+                TextSize = 12,
+                Text = model.name,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                Parent = row,
+            })
+            makeLabel({
+                Position = UDim2.fromOffset(10, 20),
+                Size = UDim2.new(1, -70, 0, 12),
+                Font = Enum.Font.Gotham,
+                TextSize = 10,
+                Text = model.provider .. " - " .. model.modelId,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                Parent = row,
+            }, "TextDim")
+            local editBtn = iconButton(row, 16, ICONS.pencil)
+            editBtn.AnchorPoint = Vector2.new(1, 0.5)
+            editBtn.Position = UDim2.new(1, -30, 0.5, 0)
+            local deleteBtn = iconButton(row, 16, ICONS.trash)
+            deleteBtn.AnchorPoint = Vector2.new(1, 0.5)
+            deleteBtn.Position = UDim2.new(1, -10, 0.5, 0)
+
+            on(editBtn.Activated, function()
+                editingUid = model.uid
+                nameBox.Text = model.name
+                idBox.Text = model.modelId
+                formProvider = model.provider
+                providerLabel.Text = model.provider
+                setCustomFieldsEnabled(model.provider == "Custom")
+                baseUrlBox.Text = model.baseUrl or ""
+                authBox.Text = model.authHeader or ""
+                saveModelBtn.Text = "Save Changes"
+                cancelEditBtn.Visible = true
+                formError.Visible = false
+            end)
+            on(deleteBtn.Activated, function()
+                for i, saved in ipairs(Settings.models) do
+                    if saved.uid == model.uid then
+                        table.remove(Settings.models, i)
+                        break
+                    end
+                end
+                if Settings.activeModel == model.uid then
+                    Settings.activeModel = nil
+                end
+                if editingUid == model.uid then
+                    clearForm()
+                end
+                saveSettings()
+                refreshModelRows()
+                Fn.updateModelHeader()
+            end)
+        end
+    end
+    function Fn.refreshModelRows()
+        refreshModelRows()
+    end
+
+    local function submitForm()
+        local name = (nameBox.Text or ""):match("^%s*(.-)%s*$")
+        local modelId = (idBox.Text or ""):match("^%s*(.-)%s*$")
+        local baseUrl = (baseUrlBox.Text or ""):match("^%s*(.-)%s*$")
+        local auth = (authBox.Text or ""):match("^%s*(.-)%s*$")
+        local function fail(message)
+            formError.Text = message
+            formError.Visible = true
+        end
+        if name == "" or modelId == "" then
+            return fail("Display name and model ID are required.")
+        end
+        if formProvider == "Custom" then
+            if baseUrl == "" then
+                return fail("A base URL is required for Custom models.")
+            end
+            if baseUrl:sub(1, 7) ~= "http://" and baseUrl:sub(1, 8) ~= "https://" then
+                return fail("Base URL must start with http:// or https://")
+            end
+        end
+        if editingUid then
+            for _, model in ipairs(Settings.models) do
+                if model.uid == editingUid then
+                    model.name = name
+                    model.modelId = modelId
+                    model.provider = formProvider
+                    model.baseUrl = formProvider == "Custom" and baseUrl or ""
+                    model.authHeader = formProvider == "Custom" and auth or ""
+                    break
+                end
+            end
+        else
+            local model = {
+                uid = HttpService:GenerateGUID(false),
+                name = name,
+                modelId = modelId,
+                provider = formProvider,
+                baseUrl = formProvider == "Custom" and baseUrl or "",
+                authHeader = formProvider == "Custom" and auth or "",
+            }
+            table.insert(Settings.models, model)
+            if not Settings.activeModel then
+                Settings.activeModel = model.uid
+            end
+        end
+        saveSettings()
+        clearForm()
+        refreshModelRows()
+        Fn.updateModelHeader()
+    end
+    on(saveModelBtn.Activated, submitForm)
+    on(cancelEditBtn.Activated, clearForm)
+end
+
+-- ===========================================================================
+-- 11. INITIALIZATION
+-- ===========================================================================
+Fn.applyTheme(Settings.theme)
+Fn.refreshChatList()
+Fn.refreshModelRows()
+Fn.updateModelHeader()
+Fn.layoutWindow(false)
+
+if Settings.lastChat then
+    for _, chat in ipairs(Chats) do
+        if chat.uid == Settings.lastChat then
+            Fn.openChat(chat)
+            break
+        end
+    end
+end
