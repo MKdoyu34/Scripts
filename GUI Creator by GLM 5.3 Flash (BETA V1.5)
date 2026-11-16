@@ -1,5 +1,5 @@
 --[[============================================================================
-    StudioGUI Creator v1.4 — WYSIWYG GUI Editor for Roblox
+    StudioGUI Creator v1.5 — WYSIWYG GUI Editor for Roblox
     Modeled after the Roblox Studio workflow.
 
     FEATURES
@@ -21,7 +21,11 @@
                                  "Customize {Type}Script Function" editor
     • Save & Load              — stores projects as files inside the
                                  "GUI_CREATOR_SAVES" folder; any file in that
-                                 folder loads regardless of its extension
+                                 folder loads regardless of its extension;
+                                 the folder is created via makefolder when the
+                                 executor needs it (strict executors), with an
+                                 auto-create fallback for the rest; Enter in
+                                 the Save dialog saves immediately
     • Viewport manipulation    — click to select, drag to move, 8-handle resize
     • ScreenGui protection     — the last remaining ScreenGui can't be deleted
     • Luau Exporter            — serializes the whole project into a clean,
@@ -49,6 +53,14 @@
                                  your key — nothing is hardcoded; if they can't
                                  be fetched, the list stays empty. Settings
                                  persist in GUI_CREATOR_AI.json.
+    • Agent mode               — one message = many AI responses: the copilot
+                                 thinks, calls tools, reads results and repeats
+                                 (up to 10 rounds). A live "Agent workflow"
+                                 trace shows every step with its duration
+                                 ("Thought  3.2s", "run_lua  4s", "Answered"),
+                                 intermediate narration appears as its own
+                                 response bubble, and failed tool calls are
+                                 surfaced as error bubbles.
     • Robust input handling    — inset calibration, touch support, pcall guards
 
     ENVIRONMENT
@@ -3191,10 +3203,12 @@ local SAVE_DIR = "GUI_CREATOR_SAVES"
 local HttpService = game:GetService("HttpService")
 
 local FS = {
-    readfile  = (type(readfile) == "function") and readfile or nil,
-    listfiles = (type(listfiles) == "function") and listfiles or nil,
-    isfolder  = (type(isfolder) == "function") and isfolder or nil,
-    isfile    = (type(isfile) == "function") and isfile or nil,
+    readfile    = (type(readfile) == "function") and readfile or nil,
+    writefile   = (type(writefile) == "function") and writefile or nil,
+    listfiles   = (type(listfiles) == "function") and listfiles or nil,
+    isfolder    = (type(isfolder) == "function") and isfolder or nil,
+    isfile      = (type(isfile) == "function") and isfile or nil,
+    makefolder  = (type(makefolder) == "function") and makefolder or nil,
 }
 
 local function ensureSaveFolder()
@@ -3207,7 +3221,21 @@ local function ensureSaveFolder()
             return true
         end
     end
-    -- Most executors create missing folders automatically on writefile.
+    -- Strict executors refuse to write into a missing folder: create it
+    -- explicitly with makefolder when the executor provides one.
+    if FS.makefolder then
+        local okMk = pcall(FS.makefolder, SAVE_DIR)
+        if okMk then
+            if not FS.isfolder then
+                return true -- makefolder reported success; trust it
+            end
+            local okChk, exists = pcall(FS.isfolder, SAVE_DIR)
+            if okChk and exists then
+                return true
+            end
+        end
+    end
+    -- Fallback: most executors create missing folders automatically on writefile.
     local ok = pcall(Executor.writefile, SAVE_DIR .. "/.keep", "GUI Creator save folder")
     return ok
 end
@@ -3525,7 +3553,7 @@ do
         dialog.Visible = false
     end)
 
-    saveButton.Activated:Connect(function()
+    local function performSave()
         if not Executor.writefile then
             notify("writefile is not available on this executor.", "warn", 3)
             return
@@ -3536,7 +3564,8 @@ do
             return
         end
         if not ensureSaveFolder() then
-            notify("Could not create the " .. SAVE_DIR .. " folder.", "error", 3.5)
+            notify("Could not create the " .. SAVE_DIR .. " folder"
+                .. (FS.makefolder and "" or " (this executor lacks makefolder)."), "error", 3.5)
             return
         end
         local data = serializeProject()
@@ -3558,6 +3587,15 @@ do
             dialog.Visible = false
         else
             notify("Save failed: " .. tostring(err), "error", 3.5)
+        end
+    end
+
+    saveButton.Activated:Connect(performSave)
+
+    -- Pressing Enter in the name box saves immediately.
+    nameBox.FocusLost:Connect(function(enterPressed)
+        if enterPressed and nameBox.Text ~= "" then
+            performSave()
         end
     end)
 
@@ -3769,7 +3807,8 @@ do
         local okList, files = pcall(FS.listfiles, SAVE_DIR)
         if not okList or typeof(files) ~= "table" then
             order += 1
-            addInfoRow("Could not read the " .. SAVE_DIR .. " folder.", order)
+            addInfoRow("Could not read the " .. SAVE_DIR .. " folder (listfiles failed"
+                .. " or the folder is missing). Saving once creates it.", order)
             return
         end
         local entries = {}
@@ -4513,7 +4552,7 @@ do
         BackgroundTransparency = 1,
         Position = UDim2.fromOffset(30, 0),
         Size = UDim2.new(1, -260, 1, 0),
-        Text = "AI Assistant  —  Gemini",
+        Text = "AI Assistant  —  Gemini · Agent mode",
         TextColor3 = THEME.Text,
         Font = Enum.Font.GothamMedium,
         TextSize = 13,
@@ -4977,6 +5016,12 @@ do
     ------------------------------------------------------------------
     local BASE_INSTRUCTIONS = [=[You are the built-in AI copilot inside "StudioGUI Creator", a WYSIWYG Roblox GUI editor running in an executor (LocalScript environment, LocalPlayer context).
 
+You run in AGENT MODE. One user message can trigger MULTIPLE responses from you: think, call tools, read the results, call more tools, then answer. The editor shows a live workflow trace for the user (each "Thought" round and every tool call with its duration), so:
+- Work in clear steps: first inspect what you need (list_ui / find_instance), then edit, then verify.
+- Between tool rounds, output ONE short narration line (e.g. "Checking the current tree, then I'll add the button.") — it appears as your response while the tools run.
+- Tool results go to you, not the user — never dump raw tool output into the chat.
+- Finish every run with a short plain-text summary of what you did.
+
 You have TWO ways to work with the UI:
 
 1) BUILT-IN TOOLS (preferred for direct reads/edits). The editor registers real Luau tools via Gemini function calling. Emit a functionCall and the tool RUNS inside the editor; its result comes back to you automatically and you can then call more tools or answer. Exact tool names:
@@ -5282,7 +5327,7 @@ Other rules:
     -- function written by us — the model only picks a name + arguments.
     ------------------------------------------------------------------
     local AI_TOOLS = {}
-    local MAX_TOOL_ROUNDS = 6
+    local MAX_TOOL_ROUNDS = 10
 
     local function registerAiTool(name, description, parameters, runFn)
         AI_TOOLS[name] = {
@@ -5954,6 +5999,139 @@ Other rules:
         end)
     end
 
+    ------------------------------------------------------------------
+    -- AGENT WORKFLOW TRACE
+    -- Each user message gets one compact timeline; every agent step is a
+    -- row with a live status dot and its duration ("Thought  3m 52s",
+    -- "run_lua  4s"). One user message = many visible AI responses.
+    ------------------------------------------------------------------
+    local function formatDuration(seconds)
+        local s = tonumber(seconds)
+        if not s or s ~= s or s < 0 then
+            return "?"
+        end
+        if s < 60 then
+            return string.format("%.1fs", s)
+        end
+        local mins = math.floor(s / 60)
+        local secs = math.floor(s % 60 + 0.5)
+        if secs >= 60 then
+            mins += 1
+            secs = 0
+        end
+        return string.format("%dm %02ds", mins, secs)
+    end
+
+    local function addAgentTimeline()
+        messageOrder += 1
+        local row = create("Frame", {
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            LayoutOrder = messageOrder,
+            ZIndex = 62,
+        }, chatScroll)
+        create("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 16),
+            BackgroundTransparency = 1,
+            Text = "Agent workflow",
+            TextColor3 = THEME.Warn,
+            Font = Enum.Font.GothamBold,
+            TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            ZIndex = 63,
+        }, row)
+        local body = create("Frame", {
+            Position = UDim2.fromOffset(0, 16),
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundColor3 = THEME.Panel,
+            BorderSizePixel = 0,
+            ZIndex = 63,
+        }, row)
+        create("UICorner", { CornerRadius = UDim.new(0, 6) }, body)
+        create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, body)
+        create("UIListLayout", {
+            Padding = UDim.new(0, 2),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, body)
+        create("UIPadding", {
+            PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8),
+            PaddingTop = UDim.new(0, 5), PaddingBottom = UDim.new(0, 5),
+        }, body)
+        scrollChatToBottom()
+        return body, { order = 0 }
+    end
+
+    -- Adds one step row to the timeline; returns a handle whose finish(ok,
+    -- durationText) stops the pulsing dot and stamps the result.
+    local function addAgentStep(body, ctx, label)
+        ctx.order += 1
+        local stepRow = create("Frame", {
+            Size = UDim2.new(1, 0, 0, 18),
+            BackgroundTransparency = 1,
+            LayoutOrder = ctx.order,
+            ZIndex = 64,
+        }, body)
+        local dot = create("Frame", {
+            Size = UDim2.fromOffset(8, 8),
+            Position = UDim2.fromOffset(2, 5),
+            BackgroundColor3 = THEME.ControlHover,
+            BorderSizePixel = 0,
+            ZIndex = 65,
+        }, stepRow)
+        create("UICorner", { CornerRadius = UDim.new(1, 0) }, dot)
+        create("TextLabel", {
+            Position = UDim2.fromOffset(16, 0),
+            Size = UDim2.new(1, -110, 1, 0),
+            BackgroundTransparency = 1,
+            Text = label,
+            TextColor3 = THEME.Text,
+            Font = Enum.Font.GothamMedium,
+            TextSize = 12,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            ZIndex = 65,
+        }, stepRow)
+        local timeLabel = create("TextLabel", {
+            AnchorPoint = Vector2.new(1, 0),
+            Position = UDim2.new(1, -2, 0, 0),
+            Size = UDim2.fromOffset(88, 18),
+            BackgroundTransparency = 1,
+            Text = "running",
+            TextColor3 = THEME.TextDim,
+            Font = Enum.Font.Gotham,
+            TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Right,
+            ZIndex = 65,
+        }, stepRow)
+
+        local pulsing = true
+        task.spawn(function()
+            local flip = false
+            while pulsing and stepRow.Parent do
+                flip = not flip
+                pcall(function()
+                    dot.BackgroundColor3 = flip and THEME.Accent or THEME.ControlHover
+                end)
+                task.wait(0.3)
+            end
+        end)
+
+        scrollChatToBottom()
+        return {
+            finish = function(ok, durationText)
+                pulsing = false
+                pcall(function()
+                    dot.BackgroundColor3 = ok and THEME.Good or THEME.Danger
+                    timeLabel.Text = durationText or formatDuration(0)
+                    timeLabel.TextColor3 = ok and THEME.TextDim or THEME.Danger
+                end)
+                scrollChatToBottom()
+            end,
+        }
+    end
+
     local function makeTextSegment(parent, content, role, order)
         local bubbleColor = THEME.PanelAlt
         if role == "user" then
@@ -6274,17 +6452,20 @@ Other rules:
         AI.waiting = waitingNow and true or false
         sendButton.Text = AI.waiting and "..." or "Send"
         if AI.waiting then
-            statusLabel.Text = ("Thinking with %s..."):format(tostring(AI.settings.model or "?"))
+            statusLabel.Text = ("Agent mode — working with %s..."):format(tostring(AI.settings.model or "?"))
         else
             refreshStatusLabel()
         end
     end
 
-    -- Chat pipeline with native tool calling:
+    -- AGENT pipeline (one user message -> many visible AI responses):
     --   1. POST with tools (functionDeclarations of our built-in Luau tools)
-    --   2. if the model returns functionCall parts -> run each tool for real
-    --   3. append functionResponse parts and POST again (max MAX_TOOL_ROUNDS)
-    --   4. when the model answers in text, show it and stop
+    --   2. every round shows a "Thought" step with the request duration
+    --   3. if the model returns functionCall parts -> each tool runs for real
+    --      and gets its own timeline row ("run_lua  4s"); intermediate model
+    --      text is rendered as its own response bubble
+    --   4. functionResponse parts go back to the model (max MAX_TOOL_ROUNDS)
+    --   5. the final text answer ends the run with an "Answered" row
     local function sendChat()
         if AI.waiting then return end
         local text = tostring(inputBox.Text):gsub("^%s+", ""):gsub("%s+$", "")
@@ -6309,11 +6490,25 @@ Other rules:
             local url = ("%s/models/%s:generateContent?key=%s"):format(
                 GEMINI_BASE, AI.settings.model, AI.settings.apiKey)
             local rounds = 0
+            local runStarted = os.clock()
+            local timeline, timelineCtx = addAgentTimeline()
+            local answeredRow = nil
+            local function finishAnswered(ok)
+                if answeredRow then return end
+                answeredRow = true
+                local row = addAgentStep(timeline, timelineCtx, "Answered")
+                row.finish(ok, formatDuration(os.clock() - runStarted))
+            end
 
             while true do
+                statusLabel.Text = ("Agent mode — thinking (%d tool round(s) so far)..."):format(rounds)
+                local thought = addAgentStep(timeline, timelineCtx, "Thought")
+                local t0 = os.clock()
                 local body = buildRequestBody(true)
                 local res, err = httpJson(url, "POST", body)
                 if not res then
+                    thought.finish(false, formatDuration(os.clock() - t0))
+                    finishAnswered(false)
                     setWaiting(false)
                     addChatMessage("error", tostring(err))
                     return
@@ -6322,6 +6517,8 @@ Other rules:
                     return HttpService:JSONDecode(res.body or "")
                 end)
                 if not (okDecode and type(data) == "table") then
+                    thought.finish(false, formatDuration(os.clock() - t0))
+                    finishAnswered(false)
                     setWaiting(false)
                     addChatMessage("error", ("Unreadable response (HTTP %s)."):format(tostring(res.code)))
                     return
@@ -6346,13 +6543,17 @@ Other rules:
                     end
                 end
                 if parseErr then
+                    thought.finish(false, formatDuration(os.clock() - t0))
+                    finishAnswered(false)
                     setWaiting(false)
                     addChatMessage("error", tostring(parseErr))
                     return
                 end
+                thought.finish(true, formatDuration(os.clock() - t0))
 
                 if type(calls) ~= "table" or #calls == 0 then
                     setWaiting(false)
+                    finishAnswered(true)
                     local finalText = tostring(reply or "")
                     table.insert(AI.history, { role = "model", text = finalText:sub(1, 6000) })
                     while #AI.history > 30 do
@@ -6362,31 +6563,45 @@ Other rules:
                     return
                 end
 
-                -- The model asked for built-in tools: run them for real and
-                -- feed every result back so it can continue or answer.
+                -- The model narrated between tools: show it as its own
+                -- response so one user message yields multiple replies.
                 rounds += 1
-                local callLines = {}
-                for _, call in ipairs(calls) do
-                    table.insert(callLines, ("- %s(%s)"):format(call.name, summarizeArgs(call.args)))
+                local narration = tostring(reply or "")
+                if narration:match("%S") then
+                    addChatMessage("model", narration)
                 end
-                table.insert(AI.history, { role = "model", text = tostring(reply or ""), calls = calls })
-                addChatMessage("tool", "Running built-in tool(s):\n" .. table.concat(callLines, "\n"))
+                table.insert(AI.history, { role = "model", text = narration, calls = calls })
 
-                local results, resultLines = {}, {}
+                local results = {}
+                local hadError = false
                 for _, call in ipairs(calls) do
+                    statusLabel.Text = ("Agent mode — running %s..."):format(tostring(call.name))
+                    local step = addAgentStep(timeline, timelineCtx, tostring(call.name))
+                    local tTool = os.clock()
                     local result = runAiTool(call)
-                    table.insert(results, { name = call.name, response = result })
-                    local short = tostring(result):gsub("[\r\n]+", " ")
-                    if #short > 220 then
-                        short = short:sub(1, 217) .. "..."
+                    local okTool = not tostring(result):match("^ERROR")
+                    step.finish(okTool, formatDuration(os.clock() - tTool))
+                    if not okTool then
+                        hadError = true
+                        local short = tostring(result):gsub("[\r\n]+", " ")
+                        if #short > 240 then
+                            short = short:sub(1, 237) .. "..."
+                        end
+                        addChatMessage("error", ("%s(%s) failed: %s"):format(
+                            tostring(call.name), summarizeArgs(call.args), short))
                     end
-                    table.insert(resultLines, ("- %s -> %s"):format(call.name, short))
+                    table.insert(results, { name = call.name, response = result })
                 end
                 table.insert(AI.history, { role = "user", toolResults = results })
-                addChatMessage("system", "Tool results:\n" .. table.concat(resultLines, "\n"))
+                if hadError then
+                    scrollChatToBottom()
+                end
 
                 if rounds >= MAX_TOOL_ROUNDS then
                     -- Force a plain-text wrap-up instead of more tool calls.
+                    statusLabel.Text = "Agent mode — wrapping up..."
+                    local wrap = addAgentStep(timeline, timelineCtx, "Thought (wrap-up)")
+                    local tWrap = os.clock()
                     local finalBody = buildRequestBody(false)
                     local lastContent = finalBody.contents[#finalBody.contents]
                     local nudge = "Tool round limit reached — summarize what you changed in plain text now (no more tool calls)."
@@ -6398,6 +6613,8 @@ Other rules:
                     local res2, err2 = httpJson(url, "POST", finalBody)
                     setWaiting(false)
                     if not res2 then
+                        wrap.finish(false, formatDuration(os.clock() - tWrap))
+                        finishAnswered(false)
                         addChatMessage("error", tostring(err2))
                         return
                     end
@@ -6409,6 +6626,8 @@ Other rules:
                         local t2, _, e2 = extractResponseParts(data2)
                         finalText = tostring(t2 or e2 or "")
                     end
+                    wrap.finish(finalText ~= "", formatDuration(os.clock() - tWrap))
+                    finishAnswered(finalText ~= "")
                     table.insert(AI.history, { role = "model", text = finalText:sub(1, 6000) })
                     while #AI.history > 30 do
                         table.remove(AI.history, 1)
@@ -6661,8 +6880,8 @@ if initialGuis[1] then
 end
 updateStatus()
 
-notify("StudioGUI Creator v1.4 loaded — " .. Executor.name, "success", 3.5)
-print("[StudioGUI Creator] Ready. Insert from the left panel, 'Add Instance' for any class (LocalScript, ModuleScript, Values...), 'Save'/'Load' for GUI_CREATOR_SAVES files, 'Export' for a standalone Luau script, 'Put on CoreGui' to protect your GUI, and 'AI' for the Gemini assistant — it can call the editor's built-in Luau tools directly (enable 'Allow AI to run code' in AI Settings for raw run_lua).")
+notify("StudioGUI Creator v1.5 loaded — " .. Executor.name, "success", 3.5)
+print("[StudioGUI Creator] Ready. Insert from the left panel, 'Add Instance' for any class (LocalScript, ModuleScript, Values...), 'Save'/'Load' for GUI_CREATOR_SAVES files, 'Export' for a standalone Luau script, 'Put on CoreGui' to protect your GUI, and 'AI' for the Gemini agent — one message can trigger multiple AI steps, each shown live in the workflow trace with timings (enable 'Allow AI to run code' in AI Settings for raw run_lua).")
 
 end -- main()
 
