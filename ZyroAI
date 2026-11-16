@@ -1,0 +1,3192 @@
+--=============================================================--
+-- Zyro AI — Gemini chat interface for Arceus X
+-- Single-file LocalScript. Moonlight theme.
+--=============================================================--
+
+--== SECTION 1: Services, capability detection, theme, utils ==--
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+local HttpService      = game:GetService("HttpService")
+local TextService      = game:GetService("TextService")
+local CoreGui          = game:GetService("CoreGui")
+local WorkspaceService = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+
+---------------------------------------------------------------
+-- Capability detection (every executor call guarded)
+---------------------------------------------------------------
+local function tryGlobal(name)
+	local env = nil
+	pcall(function()
+		env = getfenv(0)
+	end)
+	if type(env) ~= "table" then
+		env = _G
+	end
+	local ok, value = pcall(function()
+		return env[name]
+	end)
+	if ok and value ~= nil then
+		return value
+	end
+	return nil
+end
+
+-- HTTP: prefer request, then syn.request, then http_request
+local HttpFunc = nil
+do
+	local candidate = tryGlobal("request")
+	if type(candidate) == "function" then
+		HttpFunc = candidate
+	else
+		local syn = tryGlobal("syn")
+		if type(syn) == "table" and type(syn.request) == "function" then
+			HttpFunc = syn.request
+		else
+			candidate = tryGlobal("http_request")
+			if type(candidate) == "function" then
+				HttpFunc = candidate
+			end
+		end
+	end
+end
+
+local ReadFileFn   = tryGlobal("readfile")
+if type(ReadFileFn) ~= "function" then ReadFileFn = nil end
+local WriteFileFn  = tryGlobal("writefile")
+if type(WriteFileFn) ~= "function" then WriteFileFn = nil end
+local ListFilesFn  = tryGlobal("listfiles")
+if type(ListFilesFn) ~= "function" then ListFilesFn = nil end
+local MakeFolderFn = tryGlobal("makefolder")
+if type(MakeFolderFn) ~= "function" then MakeFolderFn = nil end
+local IsFileFn     = tryGlobal("isfile")
+if type(IsFileFn) ~= "function" then IsFileFn = nil end
+local SetClipboardFn = tryGlobal("setclipboard")
+if type(SetClipboardFn) ~= "function" then
+	SetClipboardFn = tryGlobal("toclipboard")
+	if type(SetClipboardFn) ~= "function" then SetClipboardFn = nil end
+end
+local IdentifyFn = tryGlobal("IdentifyExecutor")
+if type(IdentifyFn) ~= "function" then
+	IdentifyFn = tryGlobal("identifyexecutor")
+	if type(IdentifyFn) ~= "function" then
+		IdentifyFn = tryGlobal("getexecutorname")
+		if type(IdentifyFn) ~= "function" then IdentifyFn = nil end
+	end
+end
+
+local PersistenceAvailable = (ReadFileFn ~= nil) and (WriteFileFn ~= nil)
+
+local function getExecutorName()
+	if IdentifyFn then
+		local ok, name, version = pcall(IdentifyFn)
+		if ok and type(name) == "string" and #name > 0 then
+			if type(version) == "string" and #version > 0 then
+				return name .. " " .. version
+			end
+			return name
+		end
+	end
+	return "Unknown"
+end
+
+---------------------------------------------------------------
+-- Theme (every color defined once, referenced by key)
+---------------------------------------------------------------
+local Theme = {
+	MainBackground      = Color3.fromRGB(11, 11, 18),
+	WindowBackground    = Color3.fromRGB(16, 16, 25),
+	SidebarBackground   = Color3.fromRGB(13, 13, 21),
+	SecondaryBackground = Color3.fromRGB(22, 22, 34),
+	ElevatedSurface     = Color3.fromRGB(28, 28, 42),
+	HoverBackground     = Color3.fromRGB(37, 37, 56),
+	SelectedBackground  = Color3.fromRGB(41, 36, 61),
+
+	PrimaryAccent    = Color3.fromRGB(167, 139, 250),
+	SecondaryAccent  = Color3.fromRGB(139, 92, 246),
+	AccentHover      = Color3.fromRGB(185, 163, 255),
+	AccentPressed    = Color3.fromRGB(124, 58, 237),
+	AccentSubtle     = Color3.fromRGB(167, 139, 250), -- Transparency 0.898
+	AccentBorder     = Color3.fromRGB(167, 139, 250), -- Transparency 0.667
+
+	PrimaryText     = Color3.fromRGB(244, 240, 255),
+	SecondaryText   = Color3.fromRGB(184, 180, 204),
+	MutedText       = Color3.fromRGB(119, 116, 140),
+	PlaceholderText = Color3.fromRGB(102, 99, 122),
+	TextOnAccent    = Color3.fromRGB(255, 255, 255),
+
+	PrimaryBorder   = Color3.fromRGB(41, 40, 58),
+	SecondaryBorder = Color3.fromRGB(32, 31, 48),
+	FocusedBorder   = Color3.fromRGB(167, 139, 250),
+	Divider         = Color3.fromRGB(48, 45, 66),
+
+	Success = Color3.fromRGB(74, 222, 128),
+	Warning = Color3.fromRGB(251, 191, 36),
+	Error   = Color3.fromRGB(251, 113, 133),
+	Info    = Color3.fromRGB(96, 165, 250),
+	Loading = Color3.fromRGB(167, 139, 250),
+
+	UserMessageBackground = Color3.fromRGB(33, 29, 50),
+	UserMessageBorder     = Color3.fromRGB(57, 48, 79),
+	ZyroMessageBackground = Color3.fromRGB(16, 16, 25),
+	CodeBlockBackground   = Color3.fromRGB(10, 10, 16),
+	InlineCodeBackground  = Color3.fromRGB(37, 35, 56),
+	CodeBlockBorder       = Color3.fromRGB(43, 41, 64),
+
+	ComposerBackground   = Color3.fromRGB(21, 21, 33),
+	ComposerBorder       = Color3.fromRGB(48, 45, 69),
+	ComposerFocusBorder  = Color3.fromRGB(167, 139, 250),
+	PrimaryButton        = Color3.fromRGB(139, 92, 246),
+	PrimaryButtonHover   = Color3.fromRGB(167, 139, 250),
+	SecondaryButton      = Color3.fromRGB(33, 31, 49),
+	DisabledButton       = Color3.fromRGB(48, 45, 64),
+
+	ScrollbarTrack      = Color3.fromRGB(16, 16, 25),
+	ScrollbarThumb      = Color3.fromRGB(57, 53, 79),
+	ScrollbarThumbHover = Color3.fromRGB(167, 139, 250),
+}
+
+local FONT_MAIN  = Enum.Font.Gotham
+local FONT_BOLD  = Enum.Font.GothamBold
+local FONT_MONO  = Enum.Font.Code
+
+---------------------------------------------------------------
+-- Small UI helpers
+---------------------------------------------------------------
+local function new(className, props, parent)
+	local ok, inst = pcall(function()
+		return Instance.new(className)
+	end)
+	if not ok or not inst then
+		return nil
+	end
+	if props then
+		for key, value in pairs(props) do
+			pcall(function()
+				inst[key] = value
+			end)
+		end
+	end
+	if parent then
+		pcall(function()
+			inst.Parent = parent
+		end)
+	end
+	return inst
+end
+
+local function addCorner(inst, scaleRadius)
+	return new("UICorner", {
+		CornerRadius = UDim.new(scaleRadius, 0),
+	}, inst)
+end
+
+local function addStroke(inst, color, transparency, thickness)
+	return new("UIStroke", {
+		Color = color,
+		Transparency = transparency or 0,
+		Thickness = thickness or 1,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+	}, inst)
+end
+
+local function addPadding(inst, scale)
+	return new("UIPadding", {
+		PaddingTop = UDim.new(scale, 0),
+		PaddingBottom = UDim.new(scale, 0),
+		PaddingLeft = UDim.new(scale, 0),
+		PaddingRight = UDim.new(scale, 0),
+	}, inst)
+end
+
+local function tween(inst, info, props)
+	local ok, tw = pcall(function()
+		return TweenService:Create(inst, info, props)
+	end)
+	if ok and tw then
+		tw:Play()
+		return tw
+	end
+	return nil
+end
+
+local function connectSafe(signal, handler)
+	local ok, conn = pcall(function()
+		return signal:Connect(handler)
+	end)
+	if ok then
+		return conn
+	end
+	return nil
+end
+
+local function viewportSize()
+	local cam = WorkspaceService.CurrentCamera
+	if cam then
+		return cam.ViewportSize
+	end
+	return Vector2.new(1280, 720)
+end
+
+local function hoverColor(button, normal, hovered)
+	connectSafe(button.MouseEnter, function()
+		tween(button, TweenInfo.new(0.15), { BackgroundColor3 = hovered })
+	end)
+	connectSafe(button.MouseLeave, function()
+		tween(button, TweenInfo.new(0.15), { BackgroundColor3 = normal })
+	end)
+end
+
+local function makeTextLabel(props, parent)
+	props.BackgroundTransparency = 1
+	props.Font = props.Font or FONT_MAIN
+	props.TextColor3 = props.TextColor3 or Theme.PrimaryText
+	props.TextXAlignment = props.TextXAlignment or Enum.TextXAlignment.Left
+	return new("TextLabel", props, parent)
+end
+
+local function truncate(str, maxLen)
+	if #str <= maxLen then
+		return str
+	end
+	return string.sub(str, 1, maxLen - 1) .. "…"
+end
+
+--== SECTION 2: State, model metadata, persistence ==--
+
+local SAVE_FOLDER = "ZyroAI"
+local CONV_FOLDER = "ZyroAI/conversations"
+local SETTINGS_PATH = "ZyroAI/settings.json"
+local PROFILE_PATH  = "ZyroAI/profile.json"
+
+local State = {
+	apiKey        = "",
+	baseUrl       = "https://generativelanguage.googleapis.com",
+	selectedModel = "gemini-2.0-flash",
+	conversations = {},        -- array, index 1 = most recent
+	activeConvId  = nil,
+	prefs         = { showTimestamps = false, enterToSend = true },
+	profile       = { aiName = "" },
+	sidebarCollapsed = false,
+	uiExpanded    = {},        -- messageId -> bool (long message expansion)
+	modelStatus   = {},        -- modelId -> "ok" | "unavailable"
+	fetchedModels = nil,
+	modelsFetched = false,
+	busy          = false,
+	persistenceOk = PersistenceAvailable,
+}
+
+-- Static metadata about known Gemini models (context-free hints only;
+-- the live list from the API is authoritative for availability).
+local KNOWN_MODELS = {
+	{ id = "gemini-2.5-pro",           label = "Gemini 2.5 Pro",           thinking = true,  maxTokens = 65536, tempMin = 0, tempMax = 2 },
+	{ id = "gemini-2.5-flash",         label = "Gemini 2.5 Flash",         thinking = true,  maxTokens = 65536, tempMin = 0, tempMax = 2 },
+	{ id = "gemini-2.5-flash-lite",    label = "Gemini 2.5 Flash-Lite",    thinking = true,  maxTokens = 65536, tempMin = 0, tempMax = 2 },
+	{ id = "gemini-2.0-flash",         label = "Gemini 2.0 Flash",         thinking = false, maxTokens = 8192,  tempMin = 0, tempMax = 2 },
+	{ id = "gemini-2.0-flash-lite",    label = "Gemini 2.0 Flash-Lite",    thinking = false, maxTokens = 8192,  tempMin = 0, tempMax = 2 },
+	{ id = "gemini-1.5-pro",           label = "Gemini 1.5 Pro",           thinking = false, maxTokens = 8192,  tempMin = 0, tempMax = 2 },
+	{ id = "gemini-1.5-flash",         label = "Gemini 1.5 Flash",         thinking = false, maxTokens = 8192,  tempMin = 0, tempMax = 2 },
+	{ id = "gemini-1.5-flash-8b",      label = "Gemini 1.5 Flash-8B",      thinking = false, maxTokens = 8192,  tempMin = 0, tempMax = 2 },
+}
+
+local function modelMeta(id)
+	for _, m in ipairs(KNOWN_MODELS) do
+		if m.id == id then
+			return m
+		end
+	end
+	-- Unknown model: conservative defaults
+	return { id = id, label = id, thinking = false, maxTokens = 8192, tempMin = 0, tempMax = 2 }
+end
+
+local function modelLabel(id)
+	local m = modelMeta(id)
+	if m.label ~= m.id then
+		return m.label
+	end
+	return id
+end
+
+local function newConversation(title)
+	return {
+		id       = HttpService:GenerateGUID(false),
+		title    = title or "New Chat",
+		pinned   = false,
+		created  = os.time(),
+		messages = {}, -- {role="user"|"model", text=string, time=number}
+		settings = {
+			maxTokens     = nil,  -- nil = API default
+			temperature   = nil,
+			thinkingLevel = "low",
+		},
+	}
+end
+
+local function getActiveConversation()
+	for _, c in ipairs(State.conversations) do
+		if c.id == State.activeConvId then
+			return c
+		end
+	end
+	return nil
+end
+
+-- Pinned chats sort above unpinned; recency within each group.
+local function sortedConversations()
+	local arr = {}
+	for _, c in ipairs(State.conversations) do
+		table.insert(arr, c)
+	end
+	table.sort(arr, function(a, b)
+		if a.pinned ~= b.pinned then
+			return a.pinned
+		end
+		return (a.created or 0) > (b.created or 0)
+	end)
+	return arr
+end
+
+---------------------------------------------------------------
+-- Persistence (detect every function before use)
+---------------------------------------------------------------
+local function safeRead(path)
+	if not ReadFileFn then return nil end
+	local ok, content = pcall(ReadFileFn, path)
+	if ok and type(content) == "string" then
+		return content
+	end
+	return nil
+end
+
+local function safeWrite(path, content)
+	if not WriteFileFn then return false end
+	local ok = pcall(WriteFileFn, path, content)
+	return ok
+end
+
+local function ensureFolders()
+	if MakeFolderFn then
+		pcall(MakeFolderFn, SAVE_FOLDER)
+		pcall(MakeFolderFn, CONV_FOLDER)
+	end
+end
+
+local function convPath(id)
+	return CONV_FOLDER .. "/conv_" .. id .. ".json"
+end
+
+local function saveSettings()
+	if not PersistenceAvailable then return end
+	local payload = {
+		apiKey        = State.apiKey,
+		baseUrl       = State.baseUrl,
+		selectedModel = State.selectedModel,
+		prefs         = State.prefs,
+		sidebarCollapsed = State.sidebarCollapsed,
+		modelStatus   = State.modelStatus,
+	}
+	local ok, json = pcall(function()
+		return HttpService:JSONEncode(payload)
+	end)
+	if ok then
+		pcall(safeWrite, SETTINGS_PATH, json)
+	end
+end
+
+local function saveProfile()
+	if not PersistenceAvailable then return end
+	local ok, json = pcall(function()
+		return HttpService:JSONEncode(State.profile)
+	end)
+	if ok then
+		pcall(safeWrite, PROFILE_PATH, json)
+	end
+end
+
+local function saveConversation(conv)
+	if not PersistenceAvailable or not conv then return end
+	local payload = {
+		id       = conv.id,
+		title    = conv.title,
+		pinned   = conv.pinned,
+		created  = conv.created,
+		settings = conv.settings,
+		messages = conv.messages,
+	}
+	local ok, json = pcall(function()
+		return HttpService:JSONEncode(payload)
+	end)
+	if ok then
+		pcall(safeWrite, convPath(conv.id), json)
+	end
+end
+
+local function deleteConversationFile(id)
+	-- No delfile in the approved API list; overwriting with a tombstone the
+	-- loader ignores keeps us within the detected function set.
+	if not PersistenceAvailable then return end
+	pcall(safeWrite, convPath(id), HttpService:JSONEncode({ deleted = true, id = id }))
+end
+
+local function loadAll()
+	if not PersistenceAvailable then
+		return
+	end
+	ensureFolders()
+
+	do -- settings
+		local raw = safeRead(SETTINGS_PATH)
+		if raw then
+			local ok, data = pcall(function()
+				return HttpService:JSONDecode(raw)
+			end)
+			if ok and type(data) == "table" then
+				if type(data.apiKey) == "string" then State.apiKey = data.apiKey end
+				if type(data.baseUrl) == "string" and #data.baseUrl > 0 then State.baseUrl = data.baseUrl end
+				if type(data.selectedModel) == "string" and #data.selectedModel > 0 then State.selectedModel = data.selectedModel end
+				if type(data.prefs) == "table" then
+					for k, v in pairs(data.prefs) do
+						State.prefs[k] = v
+					end
+				end
+				State.sidebarCollapsed = data.sidebarCollapsed == true
+				if type(data.modelStatus) == "table" then
+					for k, v in pairs(data.modelStatus) do
+						if v == "ok" or v == "unavailable" then
+							State.modelStatus[k] = v
+						end
+					end
+				end
+			end
+		end
+	end
+
+	do -- profile
+		local raw = safeRead(PROFILE_PATH)
+		if raw then
+			local ok, data = pcall(function()
+				return HttpService:JSONDecode(raw)
+			end)
+			if ok and type(data) == "table" and type(data.aiName) == "string" then
+				State.profile.aiName = data.aiName
+			end
+		end
+	end
+
+	do -- conversations
+		local files = nil
+		if ListFilesFn then
+			local ok, result = pcall(ListFilesFn, CONV_FOLDER)
+			if ok and type(result) == "table" then
+				files = result
+			end
+		end
+		if files then
+			for _, path in ipairs(files) do
+				if type(path) == "string" and string.match(path, "conv_.+%.json$") then
+					local raw = safeRead(path)
+					if raw then
+						local ok, data = pcall(function()
+							return HttpService:JSONDecode(raw)
+						end)
+						if ok and type(data) == "table" and not data.deleted
+							and type(data.id) == "string" and type(data.messages) == "table" then
+							local conv = {
+								id       = data.id,
+								title    = type(data.title) == "string" and data.title or "New Chat",
+								pinned   = data.pinned == true,
+								created  = tonumber(data.created) or os.time(),
+								messages = {},
+								settings = {
+									maxTokens     = tonumber(data.settings and data.settings.maxTokens) or nil,
+									temperature   = tonumber(data.settings and data.settings.temperature) or nil,
+									thinkingLevel = (data.settings and data.settings.thinkingLevel == "high") and "high" or "low",
+								},
+							}
+							for _, m in ipairs(data.messages) do
+								if type(m) == "table" and type(m.text) == "string"
+									and (m.role == "user" or m.role == "model") then
+									table.insert(conv.messages, {
+										role = m.role,
+										text = m.text,
+										time = tonumber(m.time) or os.time(),
+									})
+								end
+							end
+							table.insert(State.conversations, conv)
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+--== SECTION 3: Gemini API integration ==--
+
+local function maskKey(key)
+	if #key <= 8 then
+		return string.rep("•", #key)
+	end
+	return string.sub(key, 1, 4) .. string.rep("•", 8) .. string.sub(key, -4)
+end
+
+-- Returns ok:boolean, responseTable|nil, errString|nil
+local function httpRequest(opts)
+	if not HttpFunc then
+		return false, nil, "No HTTP function available (request / syn.request / http_request missing)."
+	end
+	local ok, response = pcall(HttpFunc, opts)
+	if not ok then
+		return false, nil, "HTTP request failed: " .. tostring(response)
+	end
+	if type(response) ~= "table" or response.StatusCode == nil then
+		return false, nil, "Executor returned an incompatible response shape (missing StatusCode)."
+	end
+	return true, response, nil
+end
+
+local function apiErrorMessage(response, rawBody)
+	local code = tonumber(response and response.StatusCode) or 0
+	-- Try to pull Google's message field out of an error body
+	local detail = nil
+	if type(rawBody) == "string" and #rawBody > 0 then
+		local ok, data = pcall(function()
+			return HttpService:JSONDecode(rawBody)
+		end)
+		if ok and type(data) == "table" and type(data.error) == "table"
+			and type(data.error.message) == "string" then
+			detail = data.error.message
+		end
+	end
+	if code == 401 or code == 403 then
+		return "Invalid or unauthorized API key (HTTP " .. code .. "). Check your key in Settings → Gemini."
+	elseif code == 429 then
+		return "Rate limit or quota exceeded (HTTP 429). Wait and try again, or check your quota."
+	elseif code == 404 then
+		return "Model not found (HTTP 404). The selected model may be deprecated — pick another model."
+	elseif code >= 500 then
+		return "Gemini server error (HTTP " .. code .. "). Try again later."
+	elseif code == 0 then
+		return "Network failure or timeout. Check your connection."
+	end
+	if detail then
+		return "Gemini error (HTTP " .. code .. "): " .. detail
+	end
+	return "Unexpected response from Gemini (HTTP " .. code .. ")."
+end
+
+-- Fire a generateContent request. Yields. Returns text|nil, errString|nil
+local function geminiGenerate(conv, userText)
+	if #State.apiKey == 0 then
+		return nil, "No API key configured. Open Settings → Gemini to add one."
+	end
+	local contents = {}
+	local history = conv.messages
+	-- Cap history to keep payloads reasonable
+	local startIndex = math.max(1, #history - 19)
+	for i = startIndex, #history do
+		local m = history[i]
+		table.insert(contents, {
+			role = m.role,
+			parts = { { text = m.text } },
+		})
+	end
+	table.insert(contents, {
+		role = "user",
+		parts = { { text = userText } },
+	})
+
+	local generationConfig = {}
+	if conv.settings.maxTokens then
+		generationConfig.maxOutputTokens = conv.settings.maxTokens
+	end
+	if conv.settings.temperature then
+		generationConfig.temperature = conv.settings.temperature
+	end
+	local meta = modelMeta(State.selectedModel)
+	if meta.thinking and conv.settings.thinkingLevel == "low" then
+		-- Lowest supported thinking level: minimize thinking budget where supported.
+		generationConfig.thinkingConfig = { thinkingBudget = 0 }
+	end
+
+	local payload = {
+		contents = contents,
+	}
+	if next(generationConfig) ~= nil then
+		payload.generationConfig = generationConfig
+	end
+	if #State.profile.aiName > 0 then
+		payload.systemInstruction = {
+			parts = { { text = "The user's name is " .. State.profile.aiName .. ". Address them by this name when natural." } },
+		}
+	end
+
+	local encodeOk, body = pcall(function()
+		return HttpService:JSONEncode(payload)
+	end)
+	if not encodeOk then
+		return nil, "Failed to encode request."
+	end
+
+	local url = string.format("%s/v1beta/models/%s:generateContent",
+		State.baseUrl, State.selectedModel)
+
+	local ok, response, err = httpRequest({
+		Url = url,
+		Method = "POST",
+		Headers = {
+			["Content-Type"]   = "application/json",
+			["x-goog-api-key"] = State.apiKey,
+		},
+		Body = body,
+	})
+	if not ok then
+		return nil, err
+	end
+	if response.Success ~= true or (tonumber(response.StatusCode) or 0) >= 400 then
+		local code = tonumber(response.StatusCode) or 0
+		if code == 404 then
+			State.modelStatus[State.selectedModel] = "unavailable"
+			saveSettings()
+		end
+		return nil, apiErrorMessage(response, response.Body)
+	end
+	if type(response.Body) ~= "string" then
+		return nil, "Malformed response from Gemini (non-string body)."
+	end
+	local decodeOk, data = pcall(function()
+		return HttpService:JSONDecode(response.Body)
+	end)
+	if not decodeOk or type(data) ~= "table" then
+		return nil, "Malformed JSON from Gemini."
+	end
+	if type(data.candidates) ~= "table" or #data.candidates == 0 then
+		return nil, "Gemini returned no candidates. The prompt may have been blocked."
+	end
+	local parts = {}
+	for _, candidate in ipairs(data.candidates) do
+		if type(candidate) == "table"
+			and type(candidate.content) == "table"
+			and type(candidate.content.parts) == "table" then
+			for _, part in ipairs(candidate.content.parts) do
+				if type(part) == "table" and type(part.text) == "string" then
+					table.insert(parts, part.text)
+				end
+			end
+		end
+	end
+	if #parts == 0 then
+		return nil, "Gemini returned an empty reply."
+	end
+	State.modelStatus[State.selectedModel] = "ok"
+	return table.concat(parts, ""), nil
+end
+
+-- Fetch the live model list. Yields. Returns list|nil, err|nil
+local function fetchModels()
+	if #State.apiKey == 0 then
+		return nil, "No API key configured."
+	end
+	local url = State.baseUrl .. "/v1beta/models"
+	local ok, response, err = httpRequest({
+		Url = url,
+		Method = "GET",
+		Headers = { ["x-goog-api-key"] = State.apiKey },
+	})
+	if not ok then
+		return nil, err
+	end
+	if response.Success ~= true or (tonumber(response.StatusCode) or 0) >= 400 then
+		return nil, apiErrorMessage(response, response.Body)
+	end
+	local decodeOk, data = pcall(function()
+		return HttpService:JSONDecode(response.Body)
+	end)
+	if not decodeOk or type(data) ~= "table" or type(data.models) ~= "table" then
+		return nil, "Malformed model list from Gemini."
+	end
+	local ids = {}
+	for _, m in ipairs(data.models) do
+		if type(m) == "table" and type(m.name) == "string"
+			and type(m.supportedGenerationMethods) == "table" then
+			local id = string.gsub(m.name, "^models/", "")
+			local canGenerate = false
+			for _, method in ipairs(m.supportedGenerationMethods) do
+				if method == "generateContent" then
+					canGenerate = true
+					break
+				end
+			end
+			if canGenerate then
+				table.insert(ids, id)
+			end
+		end
+	end
+	table.sort(ids)
+	-- Any model previously marked unavailable that came back in the list stays
+	-- marked; a successful generation is what clears "unavailable".
+	return ids, nil
+end
+
+--== SECTION 4: Root GUI + notifications ==--
+
+local ScreenGui = new("ScreenGui", {
+	Name = "ZyroAI",
+	ResetOnSpawn = false,
+	IgnoreGuiInset = false,
+	DisplayOrder = 999,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, CoreGui)
+
+if not ScreenGui then
+	warn("[Zyro AI] Failed to create ScreenGui — UI initialization error.")
+	return
+end
+pcall(function()
+	ScreenGui.Parent = CoreGui
+end)
+
+-- Notification manager
+local Notifications = {}
+do
+	local CARD_H_SCALE = 0.085  -- of viewport height
+	local GAP_SCALE    = 0.012
+	local stack = {}           -- ordered oldest -> newest
+	local container = new("Frame", {
+		Name = "NotificationRoot",
+		BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(1, 1),
+		Position = UDim2.new(0.985, 0, 0.98, 0),
+		Size = UDim2.new(0.24, 0, 0.6, 0),
+		ZIndex = 80,
+	}, ScreenGui)
+
+	local function relayout(animated)
+		-- stack[1] is oldest (top of stack); newest sits at the bottom
+		local total = #stack
+		for i, entry in ipairs(stack) do
+			local indexFromBottom = total - i
+			local yOffset = -(indexFromBottom * (CARD_H_SCALE + GAP_SCALE)) / 0.6
+			local target = UDim2.new(1, 0, 1, yOffset)
+			if animated then
+				tween(entry.frame, TweenInfo.new(0.25, Enum.EasingStyle.Quad), { Position = target })
+			else
+				entry.frame.Position = target
+			end
+		end
+	end
+
+	local function dismiss(entry, instant)
+		if entry.dead then return end
+		entry.dead = true
+		if entry.progressTween then
+			pcall(function() entry.progressTween:Cancel() end)
+		end
+		for i, e in ipairs(stack) do
+			if e == entry then
+				table.remove(stack, i)
+				break
+			end
+		end
+		local function destroy()
+			if entry.frame then
+				pcall(function() entry.frame:Destroy() end)
+			end
+		end
+		if instant then
+			destroy()
+			relayout(false)
+		else
+			tween(entry.frame, TweenInfo.new(0.3), {
+				BackgroundTransparency = 1,
+				Position = entry.frame.Position + UDim.new(0.25, 0),
+			})
+			for _, d in ipairs(entry.frame:GetDescendants()) do
+				pcall(function()
+					if d:IsA("GuiObject") then
+						tween(d, TweenInfo.new(0.3), { TextTransparency = 1, BackgroundTransparency = 1 })
+					end
+				end)
+			end
+			task.delay(0.32, destroy)
+			relayout(true)
+		end
+	end
+
+	function Notifications.push(opts)
+		-- opts: title, description, status ("success"|"warning"|"error"|"info"|"loading"), duration
+		local duration = opts.duration or 4.5
+		local statusColor = Theme.Info
+		if opts.status == "success" then
+			statusColor = Theme.Success
+		elseif opts.status == "warning" then
+			statusColor = Theme.Warning
+		elseif opts.status == "error" then
+			statusColor = Theme.Error
+		elseif opts.status == "loading" then
+			statusColor = Theme.Loading
+			duration = math.max(duration, 30)
+		end
+
+		local frame = new("Frame", {
+			BackgroundColor3 = Theme.ElevatedSurface,
+			AnchorPoint = Vector2.new(1, 1),
+			Position = UDim2.new(1, 0, 1, 0),
+			Size = UDim2.new(1, 0, CARD_H_SCALE / 0.6, 0),
+			ZIndex = 80,
+			ClipsDescendants = true,
+		}, container)
+		addCorner(frame, 0.1)
+		addStroke(frame, Theme.PrimaryBorder, 0)
+
+		local dot = new("Frame", {
+			BackgroundColor3 = statusColor,
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.new(0.05, 0, 0.28, 0),
+			Size = UDim2.new(0.025, 0, 0.14, 0),
+			ZIndex = 81,
+		}, frame)
+		addCorner(dot, 0.5)
+
+		makeTextLabel({
+			Text = opts.title or "",
+			Font = FONT_BOLD,
+			TextSize = 13,
+			Position = UDim2.new(0.1, 0, 0.08, 0),
+			Size = UDim2.new(0.85, 0, 0.4, 0),
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			ZIndex = 81,
+		}, frame)
+
+		makeTextLabel({
+			Text = opts.description or "",
+			TextSize = 11,
+			TextColor3 = Theme.SecondaryText,
+			Position = UDim2.new(0.1, 0, 0.45, 0),
+			Size = UDim2.new(0.85, 0, 0.45, 0),
+			TextWrapped = true,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			ZIndex = 81,
+		}, frame)
+
+		-- progress bar (2–3 px: use thin scale of card height)
+		local barTrack = new("Frame", {
+			BackgroundColor3 = Theme.SecondaryBorder,
+			AnchorPoint = Vector2.new(0, 1),
+			Position = UDim2.new(0, 0, 1, 0),
+			Size = UDim2.new(1, 0, 0.04, 0),
+			BorderSizePixel = 0,
+			ZIndex = 81,
+		}, frame)
+		local bar = new("Frame", {
+			BackgroundColor3 = statusColor,
+			Size = UDim2.new(1, 0, 1, 0),
+			BorderSizePixel = 0,
+			ZIndex = 82,
+		}, barTrack)
+
+		local entry = { frame = frame, dead = false, progressTween = nil }
+		-- slide in
+		frame.Position = UDim2.new(1.3, 0, 1, 0)
+		tween(frame, TweenInfo.new(0.3, Enum.EasingStyle.Quad), { Position = UDim2.new(1, 0, 1, 0) })
+
+		table.insert(stack, entry)
+		while #stack > 4 do
+			dismiss(stack[1], false)
+		end
+		task.defer(relayout, true)
+
+		entry.progressTween = tween(bar, TweenInfo.new(duration, Enum.EasingStyle.Linear), {
+			Size = UDim2.new(0, 0, 1, 0),
+		})
+		task.delay(duration, function()
+			dismiss(entry, false)
+		end)
+
+		return entry
+	end
+
+	function Notifications.dismissEntry(entry)
+		if entry then
+			dismiss(entry, false)
+		end
+	end
+end
+
+--== SECTION 5: Main window scaffolding, floating toggle, dragging ==--
+
+local MainWindow = new("Frame", {
+	Name = "MainWindow",
+	BackgroundColor3 = Theme.WindowBackground,
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.new(0.5, 0, 0.5, 0),
+	Size = UDim2.new(0.6, 0, 0.72, 0),
+	ClipsDescendants = true,
+	Visible = false,
+	ZIndex = 10,
+}, ScreenGui)
+addCorner(MainWindow, 0.025)
+addStroke(MainWindow, Theme.PrimaryBorder, 0)
+
+local ToggleButton = new("TextButton", {
+	Name = "ZyroToggle",
+	BackgroundColor3 = Theme.ElevatedSurface,
+	Text = "Z",
+	Font = FONT_BOLD,
+	TextSize = 18,
+	TextColor3 = Theme.PrimaryAccent,
+	AnchorPoint = Vector2.new(1, 1),
+	Position = UDim2.new(0.97, 0, 0.9, 0),
+	Size = UDim2.new(0.038, 0, 0.068, 0),
+	AutoButtonColor = false,
+	ZIndex = 200,
+}, ScreenGui)
+addCorner(ToggleButton, 0.22)
+local toggleStroke = new("UIStroke", {
+	Color = Theme.AccentBorder,
+	Transparency = 0.667,
+	Thickness = 1,
+}, ToggleButton)
+
+-- Generic lerped drag with viewport clamping.
+local function attachDrag(handle, dragRegion)
+	local dragging = false
+	local dragStart = Vector2.zero
+	local frameStart = Vector2.zero
+	local targetVec = Vector2.new(0, 0)
+	local converged = true
+	local renderConn = nil
+	local lastInputPos = Vector2.zero
+
+	local function toVec(pos)
+		return Vector2.new(pos.X.Scale, pos.Y.Scale)
+	end
+
+	local function clampTarget(vec)
+		local vp = viewportSize()
+		local absSize = handle.AbsoluteSize
+		local anchor = handle.AnchorPoint
+		-- keep the whole frame inside the viewport (in pixels)
+		local px = vec.X * vp.X
+		local py = vec.Y * vp.Y
+		local minX = absSize.X * anchor.X
+		local maxX = vp.X - absSize.X * (1 - anchor.X)
+		local minY = absSize.Y * anchor.Y
+		local maxY = vp.Y - absSize.Y * (1 - anchor.Y)
+		if maxX < minX then maxX = minX end
+		if maxY < minY then maxY = minY end
+		px = math.clamp(px, minX, maxX)
+		py = math.clamp(py, minY, maxY)
+		return Vector2.new(px / vp.X, py / vp.Y)
+	end
+
+	local function updateTarget()
+		if not dragging then return end
+		local vp = viewportSize()
+		local delta = lastInputPos - dragStart
+		local newVec = Vector2.new(
+			frameStart.X + delta.X / vp.X,
+			frameStart.Y + delta.Y / vp.Y
+		)
+		targetVec = clampTarget(newVec)
+		converged = false
+		if not renderConn then
+			renderConn = connectSafe(RunService.RenderStepped, function(dt)
+				local current = toVec(handle.Position)
+				local nextPos = current:Lerp(targetVec, 0.2)
+				if (nextPos - targetVec).Magnitude < 0.0001 or converged then
+					handle.Position = UDim2.new(targetVec.X, 0, targetVec.Y, 0)
+					converged = true
+					if renderConn then
+						renderConn:Disconnect()
+						renderConn = nil
+					end
+				else
+					handle.Position = UDim2.new(nextPos.X, 0, nextPos.Y, 0)
+				end
+			end)
+		end
+	end
+
+	connectSafe(dragRegion.InputBegan, function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = Vector2.new(input.Position.X, input.Position.Y)
+			lastInputPos = dragStart
+			frameStart = toVec(handle.Position)
+			targetVec = clampTarget(frameStart)
+			converged = false
+		end
+	end)
+
+	connectSafe(UserInputService.InputChanged, function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+			or input.UserInputType == Enum.UserInputType.Touch) then
+			lastInputPos = Vector2.new(input.Position.X, input.Position.Y)
+			updateTarget()
+		end
+	end)
+
+	connectSafe(UserInputService.InputEnded, function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+
+	-- Re-clamp on viewport resize
+	local cam = WorkspaceService.CurrentCamera
+	if cam then
+		connectSafe(cam:GetPropertyChangedSignal("ViewportSize"), function()
+			local current = toVec(handle.Position)
+			local clamped = clampTarget(current)
+			targetVec = clamped
+			handle.Position = UDim2.new(clamped.X, 0, clamped.Y, 0)
+		end)
+	end
+end
+
+attachDrag(ToggleButton, ToggleButton)
+
+connectSafe(ToggleButton.MouseButton1Click, function()
+	MainWindow.Visible = not MainWindow.Visible
+end)
+
+connectSafe(ToggleButton.MouseEnter, function()
+	tween(ToggleButton, TweenInfo.new(0.15), { BackgroundColor3 = Theme.HoverBackground })
+	tween(toggleStroke, TweenInfo.new(0.15), { Transparency = 0.3 })
+end)
+connectSafe(ToggleButton.MouseLeave, function()
+	tween(ToggleButton, TweenInfo.new(0.15), { BackgroundColor3 = Theme.ElevatedSurface })
+	tween(toggleStroke, TweenInfo.new(0.15), { Transparency = 0.667 })
+end)
+
+--== SECTION 6: Header, sidebar frame, content layout ==--
+
+local Header = new("Frame", {
+	Name = "Header",
+	BackgroundColor3 = Theme.WindowBackground,
+	Size = UDim2.new(1, 0, 0.085, 0),
+	ZIndex = 12,
+}, MainWindow)
+new("Frame", {
+	BackgroundColor3 = Theme.Divider,
+	BorderSizePixel = 0,
+	AnchorPoint = Vector2.new(0, 1),
+	Position = UDim2.new(0, 0, 1, 0),
+	Size = UDim2.new(1, 0, 0.0018, 0),
+	ZIndex = 12,
+}, Header)
+
+attachDrag(MainWindow, Header)
+
+local LogoBadge = new("Frame", {
+	BackgroundColor3 = Theme.ElevatedSurface,
+	AnchorPoint = Vector2.new(0, 0.5),
+	Position = UDim2.new(0.018, 0, 0.5, 0),
+	Size = UDim2.new(0.05, 0, 0.62, 0),
+	ZIndex = 13,
+}, Header)
+addCorner(LogoBadge, 0.18)
+new("UIStroke", {
+	Color = Theme.AccentBorder,
+	Transparency = 0.667,
+	Thickness = 1,
+}, LogoBadge)
+makeTextLabel({
+	Text = "Z",
+	Font = FONT_BOLD,
+	TextSize = 16,
+	TextColor3 = Theme.PrimaryAccent,
+	Size = UDim2.new(1, 0, 1, 0),
+	TextXAlignment = Enum.TextXAlignment.Center,
+	ZIndex = 14,
+}, LogoBadge)
+
+makeTextLabel({
+	Text = "Zyro AI",
+	Font = FONT_BOLD,
+	TextSize = 15,
+	Position = UDim2.new(0.08, 0, 0, 0),
+	Size = UDim2.new(0.12, 0, 1, 0),
+	ZIndex = 13,
+}, Header)
+
+-- Model selector button (dropdown populated later)
+local ModelButton = new("TextButton", {
+	Name = "ModelSelector",
+	BackgroundColor3 = Theme.SecondaryButton,
+	Text = modelLabel(State.selectedModel) .. "  ▾",
+	Font = FONT_MAIN,
+	TextSize = 12,
+	TextColor3 = Theme.SecondaryText,
+	AnchorPoint = Vector2.new(1, 0.5),
+	Position = UDim2.new(0.985, 0, 0.5, 0),
+	Size = UDim2.new(0.19, 0, 0.58, 0),
+	AutoButtonColor = false,
+	ZIndex = 13,
+}, Header)
+addCorner(ModelButton, 0.14)
+addStroke(ModelButton, Theme.PrimaryBorder, 0)
+hoverColor(ModelButton, Theme.SecondaryButton, Theme.HoverBackground)
+
+-- Body split: sidebar + content
+local Body = new("Frame", {
+	BackgroundTransparency = 1,
+	Position = UDim2.new(0, 0, 0.085, 0),
+	Size = UDim2.new(1, 0, 0.915, 0),
+	ZIndex = 11,
+}, MainWindow)
+
+local Sidebar = new("Frame", {
+	Name = "Sidebar",
+	BackgroundColor3 = Theme.SidebarBackground,
+	Size = UDim2.new(0.24, 0, 1, 0),
+	ClipsDescendants = true,
+	ZIndex = 11,
+}, Body)
+-- rounded left corners only
+do
+	new("UICorner", {
+		CornerRadius = UDim.new(0.03, 0),
+	}, Sidebar)
+end
+new("Frame", { -- square the right edge by overlaying
+	BackgroundColor3 = Theme.SidebarBackground,
+	BorderSizePixel = 0,
+	AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.new(1, 0, 0, 0),
+	Size = UDim2.new(0.06, 0, 1, 0),
+	ZIndex = 11,
+}, Sidebar)
+new("Frame", { -- divider between sidebar and content
+	BackgroundColor3 = Theme.SecondaryBorder,
+	BorderSizePixel = 0,
+	AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.new(1, 0, 0, 0),
+	Size = UDim2.new(0.004, 0, 1, 0),
+	ZIndex = 12,
+}, Sidebar)
+
+local Content = new("Frame", {
+	Name = "Content",
+	BackgroundColor3 = Theme.WindowBackground,
+	Position = UDim2.new(0.24, 0, 0, 0),
+	Size = UDim2.new(0.76, 0, 1, 0),
+	ZIndex = 11,
+}, Body)
+
+-- Chat header: conversation title + model selector live in Header already;
+-- here a slim sub-header carries the active conversation title.
+local ChatHeader = new("Frame", {
+	BackgroundColor3 = Theme.WindowBackground,
+	Size = UDim2.new(1, 0, 0.075, 0),
+	ZIndex = 12,
+}, Content)
+local ConvTitle = makeTextLabel({
+	Text = "New Chat",
+	Font = FONT_BOLD,
+	TextSize = 14,
+	Position = UDim2.new(0.03, 0, 0, 0),
+	Size = UDim2.new(0.7, 0, 1, 0),
+	TextTruncate = Enum.TextTruncate.AtEnd,
+	ZIndex = 13,
+}, ChatHeader)
+new("Frame", {
+	BackgroundColor3 = Theme.SecondaryBorder,
+	BorderSizePixel = 0,
+	AnchorPoint = Vector2.new(0, 1),
+	Position = UDim2.new(0, 0, 1, 0),
+	Size = UDim2.new(1, 0, 0.0025, 0),
+	ZIndex = 12,
+}, ChatHeader)
+
+-- Chat feed
+local Feed = new("ScrollingFrame", {
+	Name = "Feed",
+	BackgroundColor3 = Theme.WindowBackground,
+	Position = UDim2.new(0, 0, 0.075, 0),
+	Size = UDim2.new(1, 0, 0.785, 0),
+	CanvasSize = UDim2.new(0, 0, 0, 0),
+	AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	ScrollBarThickness = 4,
+	ScrollBarImageColor3 = Theme.ScrollbarThumb,
+	ScrollBarImageTransparency = 0.2,
+	BorderSizePixel = 0,
+	ScrollingDirection = Enum.ScrollingDirection.Y,
+	ZIndex = 11,
+}, Content)
+new("UIListLayout", {
+	Padding = UDim.new(0.012, 0),
+	SortOrder = Enum.SortOrder.LayoutOrder,
+	HorizontalAlignment = Enum.HorizontalAlignment.Center,
+}, Feed)
+addPadding(Feed, 0.012)
+
+-- Fade edges (top / bottom / left) respond to scroll
+local function makeFade(anchor, position, size, rotation)
+	local f = new("Frame", {
+		BackgroundColor3 = Theme.WindowBackground,
+		BorderSizePixel = 0,
+		AnchorPoint = anchor,
+		Position = position,
+		Size = size,
+		ZIndex = 14,
+	}, Content)
+	local grad = new("UIGradient", {
+		Rotation = rotation,
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0),
+			NumberSequenceKeypoint.new(1, 1),
+		}),
+	}, f)
+	return f, grad
+end
+local topFade = makeFade(Vector2.new(0, 0), UDim2.new(0, 0, 0.075, 0), UDim2.new(1, 0, 0.05, 0), 90)
+local bottomFade = makeFade(Vector2.new(0, 1), UDim2.new(0, 0, 0.86, 0), UDim2.new(1, 0, 0.05, 0), -90)
+local leftFade = makeFade(Vector2.new(0, 0), UDim2.new(0, 0, 0.075, 0), UDim2.new(0.03, 0, 0.785, 0), 0)
+
+local function updateFades()
+	local maxScroll = Feed.CanvasSize.Y.Offset - Feed.AbsoluteWindowSize.Y
+	if maxScroll <= 0 then
+		topFade.Visible = false
+		bottomFade.Visible = false
+	else
+		topFade.Visible = Feed.CanvasPosition.Y > 8
+		bottomFade.Visible = Feed.CanvasPosition.Y < maxScroll - 8
+	end
+	leftFade.Visible = false -- kept subtle; only show if content overflows horizontally (never for now)
+end
+connectSafe(Feed:GetPropertyChangedSignal("CanvasPosition"), updateFades)
+connectSafe(Feed:GetPropertyChangedSignal("CanvasSize"), updateFades)
+
+local function feedNearBottom()
+	local maxScroll = Feed.CanvasSize.Y.Offset - Feed.AbsoluteWindowSize.Y
+	if maxScroll <= 0 then return true end
+	return Feed.CanvasPosition.Y >= maxScroll - 60
+end
+
+local function scrollToBottomIfNeeded()
+	if feedNearBottom() then
+		task.defer(function()
+			Feed.CanvasPosition = Vector2.new(0, math.max(0, Feed.CanvasSize.Y.Offset))
+		end)
+	end
+end
+
+--== SECTION 7: Composer + generation-settings panel ==--
+
+local ComposerBar = new("Frame", {
+	BackgroundColor3 = Theme.WindowBackground,
+	AnchorPoint = Vector2.new(0, 1),
+	Position = UDim2.new(0, 0, 1, 0),
+	Size = UDim2.new(1, 0, 0.14, 0),
+	ZIndex = 12,
+}, Content)
+
+local Composer = new("Frame", {
+	BackgroundColor3 = Theme.ComposerBackground,
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.new(0.5, 0, 0.52, 0),
+	Size = UDim2.new(0.955, 0, 0.16, 0),
+	ZIndex = 13,
+}, ComposerBar)
+addCorner(Composer, 0.09)
+local composerStroke = addStroke(Composer, Theme.ComposerBorder, 0)
+
+local PlusButton = new("TextButton", {
+	Text = "+",
+	Font = FONT_BOLD,
+	TextSize = 18,
+	TextColor3 = Theme.SecondaryText,
+	BackgroundColor3 = Theme.SecondaryButton,
+	AnchorPoint = Vector2.new(0, 1),
+	Position = UDim2.new(0.02, 0, 0.94, 0),
+	Size = UDim2.new(0.05, 0, 0.067, 0),
+	AutoButtonColor = false,
+	ZIndex = 14,
+}, Content)
+addCorner(PlusButton, 0.25)
+addStroke(PlusButton, Theme.PrimaryBorder, 0)
+hoverColor(PlusButton, Theme.SecondaryButton, Theme.HoverBackground)
+
+local InputBox = new("TextBox", {
+	Name = "ComposerInput",
+	BackgroundTransparency = 1,
+	Text = "",
+	PlaceholderText = "Message Zyro AI…",
+	PlaceholderColor3 = Theme.PlaceholderText,
+	TextColor3 = Theme.PrimaryText,
+	Font = FONT_MAIN,
+	TextSize = 14,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	TextYAlignment = Enum.TextYAlignment.Top,
+	TextWrapped = true,
+	MultiLine = true,
+	ClearTextOnFocus = false,
+	Position = UDim2.new(0.025, 0, 0.14, 0),
+	Size = UDim2.new(0.87, 0, 0.72, 0),
+	ZIndex = 14,
+}, Composer)
+
+local SendButton = new("TextButton", {
+	Text = "➤",
+	Font = FONT_BOLD,
+	TextSize = 14,
+	TextColor3 = Theme.TextOnAccent,
+	BackgroundColor3 = Theme.PrimaryButton,
+	AnchorPoint = Vector2.new(1, 1),
+	Position = UDim2.new(0.985, 0, 0.94, 0),
+	Size = UDim2.new(0.028, 0, 0.067, 0),
+	AutoButtonColor = false,
+	ZIndex = 14,
+}, Content)
+addCorner(SendButton, 0.5)
+
+local composerMinH = 0.16 -- of ComposerBar
+local composerMaxH = 0.6
+local function autosizeComposer()
+	local cs = 0.16
+	pcall(function()
+		local bound = TextService:GetTextSize(
+			InputBox.Text, 14, FONT_MAIN,
+			Vector2.new(Composer.AbsoluteSize.X * 0.87, 2000)
+		)
+		local frac = (bound.Y + 30) / ComposerBar.AbsoluteSize.Y
+		cs = math.clamp(frac, composerMinH, composerMaxH)
+	end)
+	Composer.Size = UDim2.new(0.955, 0, cs, 0)
+end
+connectSafe(InputBox:GetPropertyChangedSignal("Text"), autosizeComposer)
+
+connectSafe(InputBox.Focused, function()
+	tween(composerStroke, TweenInfo.new(0.15), { Color = Theme.ComposerFocusBorder })
+end)
+connectSafe(InputBox.FocusLost, function()
+	tween(composerStroke, TweenInfo.new(0.15), { Color = Theme.ComposerBorder })
+end)
+
+-- Generation settings popover (anchored to plus button)
+local GenPanel = new("Frame", {
+	BackgroundColor3 = Theme.ElevatedSurface,
+	AnchorPoint = Vector2.new(0, 1),
+	Position = UDim2.new(0.03, 0, 0.855, 0),
+	Size = UDim2.new(0.24, 0, 0.34, 0),
+	Visible = false,
+	ZIndex = 60,
+}, Content)
+addCorner(GenPanel, 0.06)
+addStroke(GenPanel, Theme.PrimaryBorder, 0)
+addPadding(GenPanel, 0.05)
+new("UIListLayout", {
+	Padding = UDim.new(0.04, 0),
+	SortOrder = Enum.SortOrder.LayoutOrder,
+}, GenPanel)
+
+local function genPanelLabel(text, order)
+	return makeTextLabel({
+		Text = text,
+		Font = FONT_BOLD,
+		TextSize = 11,
+		TextColor3 = Theme.MutedText,
+		Size = UDim2.new(1, 0, 0.11, 0),
+		LayoutOrder = order,
+		ZIndex = 61,
+	}, GenPanel)
+end
+
+local function genPanelInput(placeholder, order)
+	local box = new("TextBox", {
+		BackgroundColor3 = Theme.SecondaryBackground,
+		Text = "",
+		PlaceholderText = placeholder,
+		PlaceholderColor3 = Theme.PlaceholderText,
+		TextColor3 = Theme.PrimaryText,
+		Font = FONT_MAIN,
+		TextSize = 12,
+		Size = UDim2.new(1, 0, 0.15, 0),
+		ClearTextOnFocus = false,
+		LayoutOrder = order,
+		ZIndex = 61,
+	}, GenPanel)
+	addCorner(box, 0.14)
+	addStroke(box, Theme.PrimaryBorder, 0)
+	return box
+end
+
+genPanelLabel("Max output tokens", 1)
+local MaxTokensInput = genPanelInput("e.g. 1024", 2)
+genPanelLabel("Temperature", 3)
+local TempInput = genPanelInput("0.0 – 2.0", 4)
+genPanelLabel("Thinking level", 5)
+local ThinkingButton = new("TextButton", {
+	BackgroundColor3 = Theme.SecondaryButton,
+	Text = "Low",
+	Font = FONT_MAIN,
+	TextSize = 12,
+	TextColor3 = Theme.SecondaryText,
+	Size = UDim2.new(1, 0, 0.15, 0),
+	AutoButtonColor = false,
+	LayoutOrder = 6,
+	ZIndex = 61,
+}, GenPanel)
+addCorner(ThinkingButton, 0.14)
+addStroke(ThinkingButton, Theme.PrimaryBorder, 0)
+
+local thinkingLevels = { "low", "high" }
+
+local function syncGenPanel()
+	local conv = getActiveConversation()
+	local meta = modelMeta(State.selectedModel)
+	if not conv then
+		MaxTokensInput.Text = ""
+		TempInput.Text = ""
+		return
+	end
+	MaxTokensInput.Text = conv.settings.maxTokens and tostring(conv.settings.maxTokens) or ""
+	TempInput.Text = conv.settings.temperature and tostring(conv.settings.temperature) or ""
+	MaxTokensInput.PlaceholderText = "max " .. tostring(meta.maxTokens)
+	TempInput.PlaceholderText = tostring(meta.tempMin) .. " – " .. tostring(meta.tempMax)
+	ThinkingButton.Parent = meta.thinking and GenPanel or nil
+	ThinkingButton.Text = "Thinking: " .. (conv.settings.thinkingLevel or "low")
+end
+
+connectSafe(ThinkingButton.MouseButton1Click, function()
+	local conv = getActiveConversation()
+	if not conv then return end
+	local cur = conv.settings.thinkingLevel or "low"
+	local idx = table.find(thinkingLevels, cur) or 1
+	conv.settings.thinkingLevel = thinkingLevels[(idx % #thinkingLevels) + 1]
+	ThinkingButton.Text = "Thinking: " .. conv.settings.thinkingLevel
+	saveConversation(conv)
+end)
+
+local function validateAndSaveGenSettings()
+	local conv = getActiveConversation()
+	if not conv then return end
+	local meta = modelMeta(State.selectedModel)
+	local changes = 0
+
+	local mtRaw = string.gsub(MaxTokensInput.Text, "%s", "")
+	if mtRaw == "" then
+		if conv.settings.maxTokens ~= nil then
+			conv.settings.maxTokens = nil
+			changes += 1
+		end
+	else
+		local n = tonumber(mtRaw)
+		if n and n == math.floor(n) and n >= 1 and n <= meta.maxTokens then
+			if conv.settings.maxTokens ~= n then
+				conv.settings.maxTokens = n
+				changes += 1
+			end
+		else
+			Notifications.push({
+				title = "Invalid max tokens",
+				description = "Must be a positive integer ≤ " .. meta.maxTokens .. ".",
+				status = "warning",
+			})
+		end
+	end
+
+	local tRaw = string.gsub(TempInput.Text, "%s", "")
+	if tRaw == "" then
+		if conv.settings.temperature ~= nil then
+			conv.settings.temperature = nil
+			changes += 1
+		end
+	else
+		local n = tonumber(tRaw)
+		if n and n >= meta.tempMin and n <= meta.tempMax then
+			if conv.settings.temperature ~= n then
+				conv.settings.temperature = n
+				changes += 1
+			end
+		else
+			Notifications.push({
+				title = "Invalid temperature",
+				description = "Must be between " .. meta.tempMin .. " and " .. meta.tempMax .. ".",
+				status = "warning",
+			})
+		end
+	end
+
+	if changes > 0 then
+		saveConversation(conv)
+	end
+	syncGenPanel()
+end
+connectSafe(MaxTokensInput.FocusLost, function(enter)
+	validateAndSaveGenSettings()
+end)
+connectSafe(TempInput.FocusLost, function(enter)
+	validateAndSaveGenSettings()
+end)
+
+connectSafe(PlusButton.MouseButton1Click, function()
+	GenPanel.Visible = not GenPanel.Visible
+	if GenPanel.Visible then
+		syncGenPanel()
+	end
+end)
+
+--== SECTION 8: Sidebar contents + context menu ==--
+
+--=== forward declarations used across sections ===
+local refreshHistory, renderMessages, openConversation, doNewChat, closeCtxMenu
+
+local SidePad = 0.05
+
+-- collapse toggle row
+local SideTopRow = new("Frame", {
+	BackgroundTransparency = 1,
+	Size = UDim2.new(1, 0, 0.07, 0),
+	ZIndex = 12,
+}, Sidebar)
+
+local CollapseButton = new("TextButton", {
+	Text = "◀",
+	Font = FONT_MAIN,
+	TextSize = 12,
+	TextColor3 = Theme.MutedText,
+	BackgroundColor3 = Theme.SecondaryButton,
+	AnchorPoint = Vector2.new(1, 0.5),
+	Position = UDim2.new(0.94, 0, 0.5, 0),
+	Size = UDim2.new(0.14, 0, 0.55, 0),
+	AutoButtonColor = false,
+	ZIndex = 13,
+}, SideTopRow)
+addCorner(CollapseButton, 0.2)
+hoverColor(CollapseButton, Theme.SecondaryButton, Theme.HoverBackground)
+
+local sidebarExpandedW = 0.24
+local sidebarCollapsedW = 0.055
+local sidebarCollapsed = State.sidebarCollapsed
+
+local function applySidebarState(animated)
+	local w = sidebarCollapsed and sidebarCollapsedW or sidebarExpandedW
+	local info = TweenInfo.new(0.25, Enum.EasingStyle.Quad)
+	if animated then
+		tween(Sidebar, info, { Size = UDim2.new(w, 0, 1, 0) })
+		tween(Content, info, {
+			Position = UDim2.new(w, 0, 0, 0),
+			Size = UDim2.new(1 - w, 0, 1, 0),
+		})
+	else
+		Sidebar.Size = UDim2.new(w, 0, 1, 0)
+		Content.Position = UDim2.new(w, 0, 0, 0)
+		Content.Size = UDim2.new(1 - w, 0, 1, 0)
+	end
+	CollapseButton.Text = sidebarCollapsed and "▶" or "◀"
+	-- When collapsed, shrink inner controls so they don't draw outside the rail:
+	-- we toggle visibility on all direct children of Sidebar except the top row.
+	for _, child in ipairs(Sidebar:GetChildren()) do
+		if child:IsA("GuiObject") and child ~= SideTopRow
+			and child.BackgroundTransparency ~= 1 then
+			pcall(function()
+				if sidebarCollapsed then
+					child:SetAttribute("ZyHidden", child.Visible and 1 or 0)
+					child.Visible = false
+				else
+					if child:GetAttribute("ZyHidden") == 1 then
+						child.Visible = true
+					end
+					child:SetAttribute("ZyHidden", nil)
+				end
+			end)
+		end
+	end
+	closeCtxMenu()
+	SideTopRow.Visible = true
+	CollapseButton.Visible = true
+end
+
+connectSafe(CollapseButton.MouseButton1Click, function()
+	sidebarCollapsed = not sidebarCollapsed
+	State.sidebarCollapsed = sidebarCollapsed
+	saveSettings()
+	applySidebarState(true)
+end)
+
+local function sidebarButton(text, order, yPos, parent)
+	local b = new("TextButton", {
+		Text = "   " .. text,
+		Font = FONT_MAIN,
+		TextSize = 13,
+		TextColor3 = Theme.SecondaryText,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundColor3 = Theme.SidebarBackground,
+		Size = UDim2.new(1 - SidePad * 2, 0, 0.052, 0),
+		Position = UDim2.new(SidePad, 0, yPos, 0),
+		AutoButtonColor = false,
+		ZIndex = 12,
+	}, parent or Sidebar)
+	addCorner(b, 0.12)
+	hoverColor(b, Theme.SidebarBackground, Theme.HoverBackground)
+	return b
+end
+
+local NewChatButton = sidebarButton("＋  New Chat", 1, 0.075)
+NewChatButton.TextColor3 = Theme.PrimaryText
+NewChatButton.BackgroundColor3 = Theme.SecondaryBackground
+hoverColor(NewChatButton, Theme.SecondaryBackground, Theme.HoverBackground)
+
+-- search field
+local SearchBox = new("TextBox", {
+	PlaceholderText = "Search chats…",
+	PlaceholderColor3 = Theme.PlaceholderText,
+	Text = "",
+	TextColor3 = Theme.PrimaryText,
+	Font = FONT_MAIN,
+	TextSize = 12,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	BackgroundColor3 = Theme.SecondaryBackground,
+	Position = UDim2.new(SidePad, 0, 0.14, 0),
+	Size = UDim2.new(1 - SidePad * 2, 0, 0.05, 0),
+	ClearTextOnFocus = false,
+	ZIndex = 12,
+}, Sidebar)
+addCorner(SearchBox, 0.16)
+addStroke(SearchBox, Theme.SecondaryBorder, 0)
+new("UIPadding", { PaddingLeft = UDim.new(0.05, 0) }, SearchBox)
+
+-- history list
+local HistoryList = new("ScrollingFrame", {
+	BackgroundTransparency = 1,
+	Position = UDim2.new(SidePad, 0, 0.2, 0),
+	Size = UDim2.new(1 - SidePad * 2, 0, 0.68, 0),
+	CanvasSize = UDim2.new(0, 0, 0, 0),
+	AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	ScrollBarThickness = 3,
+	ScrollBarImageColor3 = Theme.ScrollbarThumb,
+	BorderSizePixel = 0,
+	ScrollingDirection = Enum.ScrollingDirection.Y,
+	ZIndex = 12,
+}, Sidebar)
+new("UIListLayout", {
+	Padding = UDim.new(0.008, 0),
+	SortOrder = Enum.SortOrder.LayoutOrder,
+}, HistoryList)
+
+-- bottom: settings + user profile
+local SettingsButton = sidebarButton("⚙  Settings", 2, 0.9)
+local ProfileRow = new("Frame", {
+	BackgroundColor3 = Theme.SecondaryBackground,
+	Position = UDim2.new(SidePad, 0, 0.95, 0),
+	Size = UDim2.new(1 - SidePad * 2, 0, 0.045, 0),
+	ZIndex = 12,
+}, Sidebar)
+addCorner(ProfileRow, 0.2)
+
+local function getRobloxIdentity()
+	local username, displayName, userId = "Unknown", "Unknown", nil
+	pcall(function()
+		if LocalPlayer then
+			username = LocalPlayer.Name or "Unknown"
+			displayName = LocalPlayer.DisplayName or "Unknown"
+			userId = LocalPlayer.UserId
+		end
+	end)
+	return username, displayName, userId
+end
+
+local AvatarImage = new("ImageLabel", {
+	BackgroundColor3 = Theme.ElevatedSurface,
+	AnchorPoint = Vector2.new(0, 0.5),
+	Position = UDim2.new(0.06, 0, 0.5, 0),
+	Size = UDim2.new(0.12, 0, 0.7, 0),
+	ZIndex = 13,
+}, ProfileRow)
+addCorner(AvatarImage, 0.5)
+local ProfileName = makeTextLabel({
+	Text = "Unknown",
+	Font = FONT_MAIN,
+	TextSize = 11,
+	TextColor3 = Theme.SecondaryText,
+	Position = UDim2.new(0.24, 0, 0, 0),
+	Size = UDim2.new(0.72, 0, 1, 0),
+	TextTruncate = Enum.TextTruncate.AtEnd,
+	ZIndex = 13,
+}, ProfileRow)
+
+task.defer(function()
+	local username, displayName, userId = getRobloxIdentity()
+	ProfileName.Text = displayName ~= "Unknown" and displayName or username
+	if userId then
+		pcall(function()
+			AvatarImage.Image = Players:GetUserThumbnailAsync(
+				userId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size48x48)
+		end)
+	end
+end)
+
+----------------------
+-- Context menu
+----------------------
+local ContextMenu = new("Frame", {
+	BackgroundColor3 = Theme.ElevatedSurface,
+	Size = UDim2.new(0.55, 0, 0.16, 0),
+	Visible = false,
+	ZIndex = 90,
+}, Sidebar)
+addCorner(ContextMenu, 0.08)
+addStroke(ContextMenu, Theme.PrimaryBorder, 0)
+new("UIListLayout", {
+	SortOrder = Enum.SortOrder.LayoutOrder,
+}, ContextMenu)
+
+local ctxTargetConv = nil
+local ctxRow = nil
+
+local function ctxItem(text, color, order)
+	local b = new("TextButton", {
+		Text = "   " .. text,
+		Font = FONT_MAIN,
+		TextSize = 12,
+		TextColor3 = color or Theme.SecondaryText,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundColor3 = Theme.ElevatedSurface,
+		Size = UDim2.new(1, 0, 0.333, 0),
+		AutoButtonColor = false,
+		LayoutOrder = order,
+		ZIndex = 91,
+	}, ContextMenu)
+	hoverColor(b, Theme.ElevatedSurface, Theme.HoverBackground)
+	return b
+end
+
+local RenameItem = ctxItem("Rename Chat", nil, 1)
+local PinItem    = ctxItem("Pin Chat", nil, 2)
+local DeleteItem = ctxItem("Delete Chat", Theme.Error, 3)
+
+closeCtxMenu = function()
+	ContextMenu.Visible = false
+	ctxTargetConv = nil
+	ctxRow = nil
+end
+
+local function openContextMenu(conv, button, row)
+	ctxTargetConv = conv
+	ctxRow = row
+	PinItem.Text = "   " .. (conv.pinned and "Unpin Chat" or "Pin Chat")
+	-- anchor to button, flip near edges (scale coordinates of Sidebar)
+	local bp = button.AbsolutePosition
+	local _sp = Sidebar.AbsolutePosition
+	local vp = viewportSize()
+	local yFrac = (bp.Y - sp.Y) / math.max(Sidebar.AbsoluteSize.Y, 1)
+	local menuH = 0.16
+	-- flip up if near the bottom edge of the sidebar/viewport
+	if (bp.Y / vp.Y) > 0.75 or (yFrac + menuH) > 1 then
+		yFrac = yFrac - menuH + 0.052
+		if yFrac < 0 then yFrac = 0 end
+	end
+	ContextMenu.Position = UDim2.new(0.42, 0, yFrac, 0)
+	ContextMenu.Visible = true
+end
+
+-- inline rename: replace row label with an input
+local function startInlineRename(row, conv)
+	local label = row:FindFirstChild("TitleLabel")
+	if not label then return end
+	closeCtxMenu()
+	label.Visible = false
+	local input = new("TextBox", {
+		Name = "RenameInput",
+		Text = conv.title,
+		Font = FONT_MAIN,
+		TextSize = 12,
+		TextColor3 = Theme.PrimaryText,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundColor3 = Theme.SecondaryBackground,
+		Size = UDim2.new(0.8, 0, 0.7, 0),
+		Position = UDim2.new(0.05, 0, 0.15, 0),
+		ClearTextOnFocus = false,
+		ZIndex = 14,
+	}, row)
+	addCorner(input, 0.15)
+	input:CaptureFocus()
+	local finished = false
+	local function finish(commit)
+		if finished then return end
+		finished = true
+		local newTitle = string.gsub(input.Text or "", "^%s*(.-)%s*$", "%1")
+		if commit and #newTitle > 0 and newTitle ~= conv.title then
+			conv.title = newTitle
+			saveConversation(conv)
+		end
+		pcall(function() input:Destroy() end)
+		label.Visible = true
+		refreshHistory()
+	end
+	connectSafe(input.FocusLost, function(enterPressed)
+		finish(true)
+	end)
+	connectSafe(input.InputBegan, function(io)
+		if io.KeyCode == Enum.KeyCode.Escape then
+			finish(false)
+		end
+	end)
+end
+
+connectSafe(RenameItem.MouseButton1Click, function()
+	if ctxTargetConv and ctxRow then
+		startInlineRename(ctxRow, ctxTargetConv)
+	else
+		closeCtxMenu()
+	end
+end)
+
+connectSafe(PinItem.MouseButton1Click, function()
+	if ctxTargetConv then
+		ctxTargetConv.pinned = not ctxTargetConv.pinned
+		saveConversation(ctxTargetConv)
+		refreshHistory()
+	end
+	closeCtxMenu()
+end)
+
+connectSafe(DeleteItem.MouseButton1Click, function()
+	local conv = ctxTargetConv
+	closeCtxMenu()
+	if not conv then return end
+	local wasActive = (State.activeConvId == conv.id)
+	for i, c in ipairs(State.conversations) do
+		if c.id == conv.id then
+			table.remove(State.conversations, i)
+			break
+		end
+	end
+	deleteConversationFile(conv.id)
+	if wasActive then
+		local remaining = sortedConversations()
+		if #remaining > 0 then
+			openConversation(remaining[1].id)
+		else
+			doNewChat()
+		end
+	end
+	refreshHistory()
+	Notifications.push({
+		title = "Chat deleted",
+		description = "The conversation was removed.",
+		status = "info",
+	})
+end)
+
+-- close context menu on outside click / Escape / row scroll
+connectSafe(UserInputService.InputBegan, function(input)
+	if not ContextMenu.Visible then return end
+	if input.KeyCode == Enum.KeyCode.Escape then
+		closeCtxMenu()
+		return
+	end
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		local pos = Vector2.new(input.Position.X, input.Position.Y)
+		local mp = ContextMenu.AbsolutePosition
+		local ms = ContextMenu.AbsoluteSize
+		if pos.X < mp.X or pos.X > mp.X + ms.X or pos.Y < mp.Y or pos.Y > mp.Y + ms.Y then
+			closeCtxMenu()
+		end
+	end
+end)
+connectSafe(HistoryList:GetPropertyChangedSignal("CanvasPosition"), function()
+	if ContextMenu.Visible then
+		closeCtxMenu()
+	end
+end)
+
+--== SECTION 9: History rendering ==--
+
+local searchQuery = ""
+
+refreshHistory = function()
+	for _, child in ipairs(HistoryList:GetChildren()) do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+	local ordered = sortedConversations()
+	local order = 0
+	for _, conv in ipairs(ordered) do
+		if searchQuery ~= "" and not string.find(string.lower(conv.title), searchQuery, 1, true) then
+			continue
+		end
+		order += 1
+		local isActive = conv.id == State.activeConvId
+		local row = new("TextButton", {
+			Name = "ConvRow",
+			Text = "",
+			BackgroundColor3 = isActive and Theme.SelectedBackground or Theme.SidebarBackground,
+			Size = UDim2.new(1, 0, 0.048, 0),
+			AutoButtonColor = false,
+			LayoutOrder = order,
+			ZIndex = 12,
+		}, HistoryList)
+		addCorner(row, 0.12)
+
+		local labelText = (conv.pinned and "📌 " or "") .. conv.title
+		local label = makeTextLabel({
+			Name = "TitleLabel",
+			Text = labelText,
+			TextSize = 12,
+			TextColor3 = isActive and Theme.PrimaryText or Theme.SecondaryText,
+			Position = UDim2.new(0.06, 0, 0, 0),
+			Size = UDim2.new(0.76, 0, 1, 0),
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			ZIndex = 13,
+		}, row)
+
+		local dots = new("TextButton", {
+			Name = "Dots",
+			Text = "⋯",
+			Font = FONT_BOLD,
+			TextSize = 14,
+			TextColor3 = Theme.MutedText,
+			BackgroundTransparency = 1,
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(0.97, 0, 0.5, 0),
+			Size = UDim2.new(0.1, 0, 0.8, 0),
+			Visible = isActive,
+			ZIndex = 14,
+		}, row)
+
+		connectSafe(row.MouseEnter, function()
+			dots.Visible = true
+			if not isActive then
+				tween(row, TweenInfo.new(0.12), { BackgroundColor3 = Theme.HoverBackground })
+			end
+		end)
+		connectSafe(row.MouseLeave, function()
+			dots.Visible = (conv.id == State.activeConvId) or ContextMenu.Visible and ctxTargetConv == conv
+			if not isActive then
+				tween(row, TweenInfo.new(0.12), { BackgroundColor3 = Theme.SidebarBackground })
+			end
+		end)
+		connectSafe(row.MouseButton1Click, function()
+			openConversation(conv.id)
+		end)
+		connectSafe(dots.MouseButton1Click, function()
+			openContextMenu(conv, dots, row)
+		end)
+	end
+end
+
+connectSafe(SearchBox:GetPropertyChangedSignal("Text"), function()
+	searchQuery = string.lower((string.gsub(SearchBox.Text or "", "^%s*(.-)%s*$", "%1")))
+	refreshHistory()
+end)
+
+--== SECTION 10: Message rendering (markdown subset + code blocks) ==--
+
+local messageIdCounter = 0
+
+local function renderInlineMarkdown(text)
+	-- Returns TextLabel-compatible rich text. We use Roblox RichText.
+	local function esc(s)
+		s = string.gsub(s, "&", "&amp;")
+		s = string.gsub(s, "<", "&lt;")
+		s = string.gsub(s, ">", "&gt;")
+		return s
+	end
+	local out = esc(text)
+	-- inline code first (single backticks, not part of fences — fences handled by block splitter)
+	out = string.gsub(out, "`([^`\n]+)`", function(code)
+		return '<font face="Code" color="rgb(200,180,255)">' .. code .. "</font>"
+	end)
+	-- bold then italic
+	out = string.gsub(out, "%*%*([^%*]+)%*%*", "<b>%1</b>")
+	out = string.gsub(out, "__([^_]+)__", "<b>%1</b>")
+	out = string.gsub(out, "%*([^%*\n]+)%*", "<i>%1</i>")
+	out = string.gsub(out, "_([^_\n]+)_", "<i>%1</i>")
+	-- links [text](url) — show text in accent; url not clickable in TextLabel
+	out = string.gsub(out, "%[([^%]]+)%]%(([^%)]+)%)", function(t, u)
+		return '<font color="rgb(167,139,250)">' .. t .. "</font>"
+	end)
+	-- strikethrough for... not needed for messages
+	return out
+end
+
+local function makeCodeBlock(code, lang, parent, order)
+	local wrap = new("Frame", {
+		BackgroundColor3 = Theme.CodeBlockBackground,
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		LayoutOrder = order,
+		ZIndex = 12,
+	}, parent)
+	addCorner(wrap, 0.04)
+	addStroke(wrap, Theme.CodeBlockBorder, 0)
+
+	local bar = new("Frame", {
+		BackgroundColor3 = Theme.InlineCodeBackground,
+		Size = UDim2.new(1, 0, 0.22, 0),
+		BackgroundTransparency = 0,
+		ZIndex = 13,
+	}, wrap)
+	addCorner(bar, 0.04)
+	makeTextLabel({
+		Text = lang ~= "" and lang or "code",
+		TextSize = 11,
+		TextColor3 = Theme.MutedText,
+		Position = UDim2.new(0.03, 0, 0, 0),
+		Size = UDim2.new(0.6, 0, 1, 0),
+		ZIndex = 14,
+	}, bar)
+	local copyBtn = new("TextButton", {
+		Text = "Copy",
+		Font = FONT_MAIN,
+		TextSize = 11,
+		TextColor3 = Theme.SecondaryText,
+		BackgroundColor3 = Theme.SecondaryButton,
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(0.97, 0, 0.5, 0),
+		Size = UDim2.new(0.15, 0, 0.7, 0),
+		AutoButtonColor = false,
+		ZIndex = 14,
+	}, bar)
+	addCorner(copyBtn, 0.2)
+	if SetClipboardFn then
+		hoverColor(copyBtn, Theme.SecondaryButton, Theme.HoverBackground)
+		connectSafe(copyBtn.MouseButton1Click, function()
+			local ok = pcall(SetClipboardFn, code)
+			Notifications.push({
+				title = ok and "Copied" or "Copy failed",
+				description = ok and "Code copied to clipboard." or "Clipboard write failed.",
+				status = ok and "success" or "error",
+			})
+		end)
+	else
+		copyBtn.TextColor3 = Theme.MutedText
+		-- inert: no handler
+	end
+
+	local body = new("Frame", {
+		BackgroundTransparency = 1,
+		Position = UDim2.new(0, 0, 0.22, 0),
+		Size = UDim2.new(1, 0, 0.78, 0),
+		ZIndex = 13,
+	}, wrap)
+	local scroll = new("ScrollingFrame", {
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 1, 0),
+		CanvasSize = UDim2.new(0, 0, 0, 0),
+		AutomaticCanvasSize = Enum.AutomaticSize.X,
+		ScrollingDirection = Enum.ScrollingDirection.X,
+		ScrollBarThickness = 3,
+		ScrollBarImageColor3 = Theme.ScrollbarThumb,
+		BorderSizePixel = 0,
+		ZIndex = 13,
+	}, body)
+	makeTextLabel({
+		Text = code,
+		Font = FONT_MONO,
+		TextSize = 12,
+		TextColor3 = Theme.SecondaryText,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		Position = UDim2.new(0.02, 0, 0.02, 0),
+		Size = UDim2.new(1, 0, 0.96, 0),
+		AutomaticSize = Enum.AutomaticSize.XY,
+		RichText = false,
+		ZIndex = 14,
+	}, scroll)
+	return wrap
+end
+
+-- Split model text into segments: {kind="text"|"code", text, lang}
+local function splitMarkdown(src)
+	local segments = {}
+	local pos = 1
+	while true do
+		local fs, fe, lang = string.find(src, "```(%w*)\n?", pos)
+		if not fs then break end
+		local cs, ce = string.find(src, "\n?```", fe + 1)
+		if not cs then
+			-- unterminated fence: treat the rest as plain text (malformed markdown safety)
+			break
+		end
+		if fs > pos then
+			table.insert(segments, { kind = "text", text = string.sub(src, pos, fs - 1) })
+		end
+		table.insert(segments, {
+			kind = "code",
+			text = string.sub(src, fe + 1, cs - 1),
+			lang = lang or "",
+		})
+		pos = ce + 1
+	end
+	if pos <= #src then
+		table.insert(segments, { kind = "text", text = string.sub(src, pos) })
+	end
+	if #segments == 0 then
+		table.insert(segments, { kind = "text", text = src })
+	end
+	return segments
+end
+
+local function renderTextSegment(container, text, order)
+	-- Split into blocks: headings, lists, tables, paragraphs
+	local lines = {}
+	for line in string.gmatch(text .. "\n", "(.-)\n") do
+		table.insert(lines, line)
+	end
+	local i = 1
+	local sub = order
+	while i <= #lines do
+		local line = lines[i]
+		-- table block: consecutive lines starting with |
+		if string.match(line, "^%s*|") then
+			local rows = {}
+			while i <= #lines and string.match(lines[i], "^%s*|") do
+				-- skip separator rows |---|
+				local strippedRow = string.gsub(string.gsub(lines[i], "\\|", ""), ":+", ""):gsub("%s", "")
+				if not string.match(strippedRow, "^%-+$") then
+					table.insert(rows, lines[i])
+				end
+				i += 1
+			end
+			sub += 1
+			local tbl = new("Frame", {
+				BackgroundColor3 = Theme.SecondaryBackground,
+				Size = UDim2.new(1, 0, 0, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				LayoutOrder = sub,
+				ZIndex = 12,
+			}, container)
+			addCorner(tbl, 0.05)
+			addStroke(tbl, Theme.CodeBlockBorder, 0)
+			new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, tbl)
+			for r, rowLine in ipairs(rows) do
+				local cells = {}
+				for cell in string.gmatch(rowLine, "|([^|]*)") do
+					table.insert(cells, (string.gsub(cell, "^%s*(.-)%s*$", "%1")))
+				end
+				local rowFrame = new("Frame", {
+					BackgroundTransparency = 1,
+					Size = UDim2.new(1, 0, 0.028, 0),
+					LayoutOrder = r,
+					ZIndex = 13,
+				}, tbl)
+				new("UIListLayout", {
+					FillDirection = Enum.FillDirection.Horizontal,
+					SortOrder = Enum.SortOrder.LayoutOrder,
+				}, rowFrame)
+				for c, cellText in ipairs(cells) do
+					makeTextLabel({
+						Text = renderInlineMarkdown(cellText),
+						RichText = true,
+						TextSize = 11,
+						Font = r == 1 and FONT_BOLD or FONT_MAIN,
+						TextColor3 = r == 1 and Theme.PrimaryText or Theme.SecondaryText,
+						TextXAlignment = Enum.TextXAlignment.Left,
+						Size = UDim2.new(1 / math.max(#cells, 1), 0, 1, 0),
+						TextTruncate = Enum.TextTruncate.AtEnd,
+						LayoutOrder = c,
+						ZIndex = 14,
+					}, rowFrame)
+				end
+			end
+		elseif string.match(line, "^%s*#") then
+			local level = #(string.match(line, "^%s*(#+)") or "")
+			local headingText = string.gsub(line, "^%s*#+%s*", "")
+			sub += 1
+			makeTextLabel({
+				Text = renderInlineMarkdown(headingText),
+				RichText = true,
+				Font = FONT_BOLD,
+				TextSize = math.max(18 - level * 2, 13),
+				TextColor3 = Theme.PrimaryText,
+				Size = UDim2.new(1, 0, math.max(26 - level * 2, 18) / 700, 0),
+				LayoutOrder = sub,
+				ZIndex = 12,
+			}, container)
+			i += 1
+		elseif string.match(line, "^%s*[-*]%s+") or string.match(line, "^%s*%d+%.%s+") then
+			local itemText = string.gsub(line, "^%s*[-*]%s+", "")
+			itemText = string.gsub(itemText, "^%s*%d+%.%s+", "")
+			sub += 1
+			makeTextLabel({
+				Text = "  •  " .. renderInlineMarkdown(itemText),
+				RichText = true,
+				TextSize = 13,
+				TextColor3 = Theme.SecondaryText,
+				Size = UDim2.new(1, 0, 0.026, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				TextWrapped = true,
+				LayoutOrder = sub,
+				ZIndex = 12,
+			}, container)
+			i += 1
+		elseif string.gsub(line, "%s", "") == "" then
+			i += 1 -- skip blank lines
+		else
+			-- gather a paragraph (consecutive non-empty, non-special lines)
+			local para = { line }
+			i += 1
+			while i <= #lines do
+				local l = lines[i]
+				if string.gsub(l, "%s", "") == "" then
+					i += 1
+					break
+				end
+				if string.match(l, "^%s*#") or string.match(l, "^%s*[-*]%s+")
+					or string.match(l, "^%s*%d+%.%s+") or string.match(l, "^%s*|")
+					or string.match(l, "^%s*```") then
+					break
+				end
+				table.insert(para, l)
+				i += 1
+			end
+			sub += 1
+			makeTextLabel({
+				Text = renderInlineMarkdown(table.concat(para, " ")),
+				RichText = true,
+				TextSize = 13,
+				TextColor3 = Theme.SecondaryText,
+				TextWrapped = true,
+				Size = UDim2.new(1, 0, 0, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				LayoutOrder = sub,
+				ZIndex = 12,
+			}, container)
+		end
+	end
+	return sub
+end
+
+local function renderMessageContent(container, text, orderStart)
+	local segments = splitMarkdown(text)
+	local order = orderStart
+	for _, seg in ipairs(segments) do
+		if seg.kind == "code" then
+			order += 1
+			makeCodeBlock(seg.text, seg.lang, container, order)
+		else
+			order = renderTextSegment(container, seg.text, order)
+		end
+	end
+end
+
+local EmptyState = nil
+local function showEmptyState()
+	if not EmptyState then
+		EmptyState = new("Frame", {
+			BackgroundTransparency = 1,
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(0.74, 0, 0.45, 0),
+			Size = UDim2.new(0.4, 0, 0.25, 0),
+			ZIndex = 11,
+		}, Body)
+		local badge = new("Frame", {
+			BackgroundColor3 = Theme.ElevatedSurface,
+			AnchorPoint = Vector2.new(0.5, 0),
+			Position = UDim2.new(0.5, 0, 0, 0),
+			Size = UDim2.new(0.18, 0, 0.38, 0),
+			ZIndex = 12,
+		}, EmptyState)
+		addCorner(badge, 0.18)
+		new("UIStroke", { Color = Theme.AccentBorder, Transparency = 0.667, Thickness = 1 }, badge)
+		makeTextLabel({
+			Text = "Z",
+			Font = FONT_BOLD,
+			TextSize = 22,
+			TextColor3 = Theme.PrimaryAccent,
+			Size = UDim2.new(1, 0, 1, 0),
+			TextXAlignment = Enum.TextXAlignment.Center,
+			ZIndex = 13,
+		}, badge)
+		makeTextLabel({
+			Text = "Zyro AI",
+			Font = FONT_BOLD,
+			TextSize = 17,
+			AnchorPoint = Vector2.new(0.5, 0),
+			Position = UDim2.new(0.5, 0, 0.45, 0),
+			Size = UDim2.new(1, 0, 0.2, 0),
+			TextXAlignment = Enum.TextXAlignment.Center,
+			ZIndex = 12,
+		}, EmptyState)
+		makeTextLabel({
+			Text = "Start a conversation with Gemini.",
+			TextSize = 12,
+			TextColor3 = Theme.MutedText,
+			AnchorPoint = Vector2.new(0.5, 0),
+			Position = UDim2.new(0.5, 0, 0.68, 0),
+			Size = UDim2.new(1, 0, 0.16, 0),
+			TextXAlignment = Enum.TextXAlignment.Center,
+			ZIndex = 12,
+		}, EmptyState)
+	end
+	EmptyState.Visible = true
+end
+
+local function hideEmptyState()
+	if EmptyState then
+		EmptyState.Visible = false
+	end
+end
+
+local function addMessageBubble(msg)
+	messageIdCounter += 1
+	local isUser = msg.role == "user"
+
+	local holder = new("Frame", {
+		BackgroundTransparency = 1,
+		Size = UDim2.new(0.9, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		LayoutOrder = messageIdCounter,
+		ZIndex = 11,
+	}, Feed)
+
+	local bubble = new("Frame", {
+		BackgroundColor3 = isUser and Theme.UserMessageBackground or Theme.ZyroMessageBackground,
+		AnchorPoint = isUser and Vector2.new(1, 0) or Vector2.new(0, 0),
+		Position = isUser and UDim2.new(1, 0, 0, 0) or UDim2.new(0, 0, 0, 0),
+		Size = UDim2.new(isUser and 0.75 or 0.92, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		LayoutOrder = 1,
+		ZIndex = 12,
+	}, holder)
+	addCorner(bubble, 0.05)
+	if isUser then
+		addStroke(bubble, Theme.UserMessageBorder, 0)
+	else
+		addStroke(bubble, Theme.SecondaryBorder, 0)
+	end
+	addPadding(bubble, 0.03)
+
+	local inner = new("Frame", {
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		ZIndex = 13,
+	}, bubble)
+	new("UIListLayout", {
+		Padding = UDim.new(0.02, 0),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, inner)
+
+	local text = msg.text or ""
+	local isLong = isUser and #text >= 300
+	local msgKey = msg.id or ("msg" .. tostring(messageIdCounter))
+
+	if isLong then
+		local preview = truncate(text, 280)
+		local expanded = State.uiExpanded[msgKey] == true
+		local label = makeTextLabel({
+			Text = expanded and text or preview,
+			TextSize = 13,
+			TextColor3 = Theme.PrimaryText,
+			TextWrapped = true,
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			LayoutOrder = 1,
+			ZIndex = 14,
+		}, inner)
+		local toggle = new("TextButton", {
+			Text = expanded and "Show less" or "Show more",
+			Font = FONT_BOLD,
+			TextSize = 11,
+			TextColor3 = Theme.PrimaryAccent,
+			BackgroundTransparency = 1,
+			Size = UDim2.new(1, 0, 0.022, 0),
+			TextXAlignment = Enum.TextXAlignment.Left,
+			LayoutOrder = 2,
+			ZIndex = 14,
+		}, inner)
+		connectSafe(toggle.MouseButton1Click, function()
+			State.uiExpanded[msgKey] = not State.uiExpanded[msgKey]
+			local nowExpanded = State.uiExpanded[msgKey]
+			label.Text = nowExpanded and text or preview
+			toggle.Text = nowExpanded and "Show less" or "Show more"
+		end)
+	else
+		renderMessageContent(inner, text, 0)
+	end
+
+	return holder
+end
+
+local TypingBubble = nil
+local function showTyping()
+	if TypingBubble then return end
+	messageIdCounter += 1
+	TypingBubble = new("Frame", {
+		BackgroundColor3 = Theme.ZyroMessageBackground,
+		Size = UDim2.new(0.18, 0, 0.035, 0),
+		LayoutOrder = messageIdCounter,
+		ZIndex = 12,
+	}, Feed)
+	addCorner(TypingBubble, 0.1)
+	addStroke(TypingBubble, Theme.SecondaryBorder, 0)
+	local dots = {}
+	for i = 1, 3 do
+		local d = new("Frame", {
+			BackgroundColor3 = Theme.Loading,
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.new(0.2 + (i - 1) * 0.25, 0, 0.5, 0),
+			Size = UDim2.new(0.1, 0, 0.16, 0),
+			ZIndex = 13,
+		}, TypingBubble)
+		addCorner(d, 0.5)
+		table.insert(dots, d)
+	end
+	task.spawn(function()
+		local t = 0
+		while TypingBubble do
+			t = t + 0.25
+			for i, d in ipairs(dots) do
+				local phase = (t + i * 0.2) % 0.9
+				d.BackgroundTransparency = phase < 0.35 and 0.1 or 0.65
+			end
+			task.wait(0.12)
+		end
+	end)
+	scrollToBottomIfNeeded()
+end
+
+local function hideTyping()
+	if TypingBubble then
+		pcall(function() TypingBubble:Destroy() end)
+		TypingBubble = nil
+	end
+end
+
+renderMessages = function()
+	for _, child in ipairs(Feed:GetChildren()) do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+	local conv = getActiveConversation()
+	if not conv or #conv.messages == 0 then
+		showEmptyState()
+		return
+	end
+	hideEmptyState()
+	for _, msg in ipairs(conv.messages) do
+		addMessageBubble(msg)
+	end
+	task.defer(function()
+		Feed.CanvasPosition = Vector2.new(0, math.max(0, Feed.CanvasSize.Y.Offset))
+	end)
+end
+
+openConversation = function(id)
+	State.activeConvId = id
+	local conv = getActiveConversation()
+	ConvTitle.Text = conv and conv.title or "New Chat"
+	refreshHistory()
+	renderMessages()
+	GenPanel.Visible = false
+end
+
+doNewChat = function()
+	local conv = newConversation()
+	table.insert(State.conversations, 1, conv)
+	saveConversation(conv)
+	openConversation(conv.id)
+end
+
+connectSafe(NewChatButton.MouseButton1Click, doNewChat)
+
+--== SECTION 11: Sending ==--
+
+local function setBusy(busy)
+	State.busy = busy
+	if busy then
+		tween(SendButton, TweenInfo.new(0.15), { BackgroundColor3 = Theme.DisabledButton })
+	else
+		tween(SendButton, TweenInfo.new(0.15), { BackgroundColor3 = Theme.PrimaryButton })
+	end
+end
+
+local function sendMessage()
+	if State.busy then return end
+	local text = InputBox.Text or ""
+	local trimmed = string.gsub(text, "^%s*(.-)%s*$", "%1")
+	if trimmed == "" then return end
+	if #State.apiKey == 0 then
+		Notifications.push({
+			title = "API key missing",
+			description = "Add your Gemini API key in Settings → Gemini.",
+			status = "warning",
+		})
+		return
+	end
+
+	local conv = getActiveConversation()
+	if not conv then
+		doNewChat()
+		conv = getActiveConversation()
+		if not conv then return end
+	end
+
+	setBusy(true)
+	InputBox.Text = ""
+	autosizeComposer()
+
+	conv.messages[#conv.messages + 1] = {
+		role = "user",
+		text = text, -- complete text to Gemini
+		time = os.time(),
+		id = "u" .. tostring(messageIdCounter + 1),
+	}
+	-- title new chats from the first message
+	if conv.title == "New Chat" then
+		conv.title = truncate(trimmed, 34)
+		ConvTitle.Text = conv.title
+		refreshHistory()
+	end
+	saveConversation(conv)
+
+	hideEmptyState()
+	addMessageBubble(conv.messages[#conv.messages])
+	scrollToBottomIfNeeded()
+	showTyping()
+
+	task.spawn(function()
+		local reply, err = geminiGenerate(conv, text)
+		hideTyping()
+		setBusy(false)
+		if reply then
+			conv.messages[#conv.messages + 1] = {
+				role = "model",
+				text = reply,
+				time = os.time(),
+			}
+			saveConversation(conv)
+			addMessageBubble(conv.messages[#conv.messages])
+			scrollToBottomIfNeeded()
+		else
+			Notifications.push({
+				title = "Gemini request failed",
+				description = err or "Unknown error.",
+				status = "error",
+				duration = 6,
+			})
+		end
+	end)
+end
+
+connectSafe(SendButton.MouseButton1Click, sendMessage)
+hoverColor(SendButton, Theme.PrimaryButton, Theme.PrimaryButtonHover)
+
+connectSafe(InputBox.InputBegan, function(input)
+	if input.KeyCode == Enum.KeyCode.Return or input.KeyCode == Enum.KeyCode.KeypadEnter then
+		local shift = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
+			or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+		if not shift and State.prefs.enterToSend ~= false then
+			task.defer(sendMessage)
+		end
+	end
+end)
+
+--== SECTION 12: Model selector dropdown ==--
+
+local ModelDropdown = new("Frame", {
+	BackgroundColor3 = Theme.ElevatedSurface,
+	AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.new(0.985, 0, 0.085, 0),
+	Size = UDim2.new(0.22, 0, 0.4, 0),
+	Visible = false,
+	ZIndex = 70,
+}, MainWindow)
+addCorner(ModelDropdown, 0.05)
+addStroke(ModelDropdown, Theme.PrimaryBorder, 0)
+
+local ModelList = new("ScrollingFrame", {
+	BackgroundTransparency = 1,
+	Size = UDim2.new(1, 0, 1, 0),
+	CanvasSize = UDim2.new(0, 0, 0, 0),
+	AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	ScrollBarThickness = 3,
+	ScrollBarImageColor3 = Theme.ScrollbarThumb,
+	BorderSizePixel = 0,
+	ZIndex = 71,
+}, ModelDropdown)
+new("UIListLayout", {
+	SortOrder = Enum.SortOrder.LayoutOrder,
+}, ModelList)
+
+local function refreshModelDropdown()
+	for _, child in ipairs(ModelList:GetChildren()) do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+	local order = 0
+	local function addModelRow(id)
+		order += 1
+		local unavailable = State.modelStatus[id] == "unavailable"
+		local isSelected = id == State.selectedModel
+		local row = new("TextButton", {
+			Text = "",
+			BackgroundColor3 = isSelected and Theme.SelectedBackground or Theme.ElevatedSurface,
+			Size = UDim2.new(1, 0, 0.095, 0),
+			AutoButtonColor = false,
+			LayoutOrder = order,
+			ZIndex = 72,
+		}, ModelList)
+		local label = makeTextLabel({
+			Text = modelLabel(id),
+			TextSize = 12,
+			TextColor3 = unavailable and Theme.MutedText or Theme.SecondaryText,
+			Position = UDim2.new(0.06, 0, 0, 0),
+			Size = UDim2.new(0.9, 0, 1, 0),
+			ZIndex = 73,
+		}, row)
+		if unavailable then
+			-- strikethrough line
+			new("Frame", {
+				BackgroundColor3 = Theme.MutedText,
+				BorderSizePixel = 0,
+				AnchorPoint = Vector2.new(0, 0.5),
+				Position = UDim2.new(0.06, 0, 0.5, 0),
+				Size = UDim2.new(0.6, 0, 0.03, 0),
+				ZIndex = 74,
+			}, row)
+		end
+		connectSafe(row.MouseEnter, function()
+			if not isSelected then
+				tween(row, TweenInfo.new(0.12), { BackgroundColor3 = Theme.HoverBackground })
+			end
+		end)
+		connectSafe(row.MouseLeave, function()
+			if not isSelected then
+				tween(row, TweenInfo.new(0.12), { BackgroundColor3 = Theme.ElevatedSurface })
+			end
+		end)
+		connectSafe(row.MouseButton1Click, function()
+			State.selectedModel = id
+			saveSettings()
+			ModelButton.Text = modelLabel(id) .. "  ▾"
+			ModelDropdown.Visible = false
+			refreshModelDropdown()
+			syncGenPanel()
+		end)
+	end
+
+	-- working models first (never confirmed unavailable), then a non-working section
+	local ids = {}
+	if State.fetchedModels then
+		for _, id in ipairs(State.fetchedModels) do
+			table.insert(ids, id)
+		end
+	else
+		for _, m in ipairs(KNOWN_MODELS) do
+			table.insert(ids, m.id)
+		end
+	end
+	-- ensure current selection is present even if not in the list
+	local found = false
+	for _, id in ipairs(ids) do
+		if id == State.selectedModel then
+			found = true
+			break
+		end
+	end
+	if not found then
+		table.insert(ids, 1, State.selectedModel)
+	end
+
+	local working, nonWorking = {}, {}
+	for _, id in ipairs(ids) do
+		if State.modelStatus[id] == "unavailable" then
+			table.insert(nonWorking, id)
+		else
+			table.insert(working, id)
+		end
+	end
+	for _, id in ipairs(working) do
+		addModelRow(id)
+	end
+	if #nonWorking > 0 then
+		order += 1
+		makeTextLabel({
+			Text = "Non-working Models",
+			Font = FONT_BOLD,
+			TextSize = 10,
+			TextColor3 = Theme.MutedText,
+			Size = UDim2.new(1, 0, 0.08, 0),
+			Position = UDim2.new(0, 0, 0, 0),
+			LayoutOrder = order,
+			ZIndex = 72,
+			TextXAlignment = Enum.TextXAlignment.Center,
+		}, ModelList)
+		for _, id in ipairs(nonWorking) do
+			addModelRow(id)
+		end
+	end
+end
+
+connectSafe(ModelButton.MouseButton1Click, function()
+	ModelDropdown.Visible = not ModelDropdown.Visible
+	if ModelDropdown.Visible then
+		refreshModelDropdown()
+	end
+end)
+
+connectSafe(UserInputService.InputBegan, function(input)
+	if ModelDropdown.Visible
+		and (input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch) then
+		local pos = Vector2.new(input.Position.X, input.Position.Y)
+		local mp = ModelDropdown.AbsolutePosition
+		local ms = ModelDropdown.AbsoluteSize
+		if pos.X < mp.X or pos.X > mp.X + ms.X or pos.Y < mp.Y or pos.Y > mp.Y + ms.Y then
+			ModelDropdown.Visible = false
+		end
+	end
+end)
+
+refreshModelDropdown()
+
+--== SECTION 13: Settings modal ==--
+
+local SettingsModal = nil
+
+local function closeSettings()
+	if SettingsModal then
+		pcall(function() SettingsModal:Destroy() end)
+		SettingsModal = nil
+	end
+end
+
+local function openSettings()
+	if SettingsModal then return end -- single instance
+
+	SettingsModal = new("Frame", {
+		Name = "SettingsBackdrop",
+		BackgroundColor3 = Color3.fromRGB(0, 0, 0),
+		BackgroundTransparency = 0.3,
+		Size = UDim2.new(1, 0, 1, 0),
+		ZIndex = 150,
+	}, ScreenGui)
+	-- clicking backdrop does NOT close (no handler on backdrop)
+
+	local panel = new("Frame", {
+		BackgroundColor3 = Theme.WindowBackground,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0.5, 0),
+		Size = UDim2.new(0.36, 0, 0.66, 0),
+		ZIndex = 151,
+		ClipsDescendants = true,
+	}, SettingsModal)
+	addCorner(panel, 0.035)
+	addStroke(panel, Theme.PrimaryBorder, 0)
+
+	-- header
+	makeTextLabel({
+		Text = "Settings",
+		Font = FONT_BOLD,
+		TextSize = 15,
+		Position = UDim2.new(0.05, 0, 0, 0),
+		Size = UDim2.new(0.3, 0, 0.09, 0),
+		ZIndex = 152,
+	}, panel)
+	local closeBtn = new("TextButton", {
+		Text = "✕",
+		Font = FONT_BOLD,
+		TextSize = 13,
+		TextColor3 = Theme.MutedText,
+		BackgroundColor3 = Theme.SecondaryButton,
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(0.965, 0, 0.02, 0),
+		Size = UDim2.new(0.05, 0, 0.055, 0),
+		AutoButtonColor = false,
+		ZIndex = 152,
+	}, panel)
+	addCorner(closeBtn, 0.3)
+	hoverColor(closeBtn, Theme.SecondaryButton, Theme.HoverBackground)
+	connectSafe(closeBtn.MouseButton1Click, closeSettings)
+
+	-- tabs
+	local tabBar = new("Frame", {
+		BackgroundColor3 = Theme.SecondaryBackground,
+		Position = UDim2.new(0.04, 0, 0.095, 0),
+		Size = UDim2.new(0.92, 0, 0.065, 0),
+		ZIndex = 152,
+	}, panel)
+	addCorner(tabBar, 0.14)
+	new("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		Padding = UDim.new(0.02, 0),
+	}, tabBar)
+
+	local pages = {}
+	local tabButtons = {}
+	local pageContainer = new("Frame", {
+		BackgroundTransparency = 1,
+		Position = UDim2.new(0.04, 0, 0.17, 0),
+		Size = UDim2.new(0.92, 0, 0.8, 0),
+		ClipsDescendants = true,
+		ZIndex = 152,
+	}, panel)
+
+	local function makeTab(name, order)
+		local btn = new("TextButton", {
+			Text = name,
+			Font = FONT_MAIN,
+			TextSize = 12,
+			TextColor3 = Theme.MutedText,
+			BackgroundColor3 = Theme.SecondaryBackground,
+			Size = UDim2.new(0.32, 0, 0.8, 0),
+			AnchorPoint = Vector2.new(0, 0.5),
+			AutoButtonColor = false,
+			LayoutOrder = order,
+			ZIndex = 153,
+		}, tabBar)
+		addCorner(btn, 0.14)
+		tabButtons[name] = btn
+		local page = new("ScrollingFrame", {
+			BackgroundTransparency = 1,
+			Size = UDim2.new(1, 0, 1, 0),
+			Visible = false,
+			CanvasSize = UDim2.new(0, 0, 0, 0),
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			ScrollBarThickness = 3,
+			ScrollBarImageColor3 = Theme.ScrollbarThumb,
+			BorderSizePixel = 0,
+			ZIndex = 152,
+		}, pageContainer)
+		new("UIListLayout", {
+			Padding = UDim.new(0.03, 0),
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		}, page)
+		pages[name] = page
+		connectSafe(btn.MouseButton1Click, function()
+			for n, p in pairs(pages) do p.Visible = (n == name) end
+			for n, b in pairs(tabButtons) do
+				local active = (n == name)
+				b.TextColor3 = active and Theme.PrimaryText or Theme.MutedText
+				tween(b, TweenInfo.new(0.12), {
+					BackgroundColor3 = active and Theme.SelectedBackground or Theme.SecondaryBackground,
+				})
+			end
+		end)
+		return page
+	end
+
+	local settingsPage = makeTab("Settings", 1)
+	local profilePage  = makeTab("Profile", 2)
+	local geminiPage   = makeTab("Gemini", 3)
+
+	-- helpers for rows
+	local function pageLabel(text, page, order)
+		return makeTextLabel({
+			Text = text,
+			Font = FONT_BOLD,
+			TextSize = 11,
+			TextColor3 = Theme.MutedText,
+			Size = UDim2.new(1, 0, 0.06, 0),
+			LayoutOrder = order,
+			ZIndex = 153,
+		}, page)
+	end
+	local function pageInput(placeholder, page, order, masked)
+		local box = new("TextBox", {
+			BackgroundColor3 = Theme.SecondaryBackground,
+			Text = "",
+			PlaceholderText = placeholder,
+			PlaceholderColor3 = Theme.PlaceholderText,
+			TextColor3 = Theme.PrimaryText,
+			Font = FONT_MAIN,
+			TextSize = 12,
+			Size = UDim2.new(1, 0, 0.075, 0),
+			ClearTextOnFocus = false,
+			LayoutOrder = order,
+			ZIndex = 153,
+		}, page)
+		addCorner(box, 0.1)
+		addStroke(box, Theme.PrimaryBorder, 0)
+		new("UIPadding", { PaddingLeft = UDim.new(0.04, 0) }, box)
+		return box
+	end
+	local function pageButton(text, page, order, primary)
+		local b = new("TextButton", {
+			Text = text,
+			Font = FONT_BOLD,
+			TextSize = 12,
+			TextColor3 = primary and Theme.TextOnAccent or Theme.SecondaryText,
+			BackgroundColor3 = primary and Theme.PrimaryButton or Theme.SecondaryButton,
+			Size = UDim2.new(1, 0, 0.07, 0),
+			AutoButtonColor = false,
+			LayoutOrder = order,
+			ZIndex = 153,
+		}, page)
+		addCorner(b, 0.12)
+		hoverColor(b, primary and Theme.PrimaryButton or Theme.SecondaryButton,
+			primary and Theme.PrimaryButtonHover or Theme.HoverBackground)
+		return b
+	end
+
+	---- Settings tab ----
+	pageLabel("interface", settingsPage, 1)
+	local enterToggle = pageButton("Enter sends message: " .. (State.prefs.enterToSend ~= false and "On" or "Off"), settingsPage, 2)
+	connectSafe(enterToggle.MouseButton1Click, function()
+		State.prefs.enterToSend = not (State.prefs.enterToSend ~= false)
+		enterToggle.Text = "Enter sends message: " .. (State.prefs.enterToSend and "On" or "Off")
+		saveSettings()
+	end)
+
+	pageLabel("persistence", settingsPage, 3)
+	makeTextLabel({
+		Text = State.persistenceOk
+			and "Persistence is available. Conversations and settings are stored as files in the executor workspace."
+			or  "Persistence is unavailable: readfile/writefile were not detected.",
+		TextSize = 11,
+		TextColor3 = State.persistenceOk and Theme.SecondaryText or Theme.Warning,
+		TextWrapped = true,
+		Size = UDim2.new(1, 0, 0.09, 0),
+		LayoutOrder = 4,
+		ZIndex = 153,
+	}, settingsPage)
+	local clearBtn = pageButton("Clear all saved data", settingsPage, 5)
+	connectSafe(clearBtn.MouseButton1Click, function()
+		if not PersistenceAvailable then
+			Notifications.push({
+				title = "Persistence unavailable",
+				description = "File functions missing; nothing stored locally by Zyro AI.",
+				status = "warning",
+			})
+			return
+		end
+		for _, conv in ipairs(State.conversations) do
+			deleteConversationFile(conv.id)
+		end
+		State.conversations = {}
+		State.apiKey = ""
+		saveSettings()
+		safeWrite(PROFILE_PATH, HttpService:JSONEncode({ aiName = "" }))
+		doNewChat()
+		Notifications.push({
+			title = "Data cleared",
+			description = "Saved conversations and settings were removed.",
+			status = "info",
+		})
+	end)
+
+	---- Profile tab ----
+	pageLabel("name for gemini", profilePage, 1)
+	local nameInput = pageInput("What should Gemini call you?", profilePage, 2)
+	nameInput.Text = State.profile.aiName
+		local saveNameBtn = pageButton("Save name", profilePage, 3, true)
+	connectSafe(saveNameBtn.MouseButton1Click, function()
+		State.profile.aiName = string.gsub(nameInput.Text or "", "^%s*(.-)%s*$", "%1")
+		saveProfile()
+		Notifications.push({
+			title = "Profile saved",
+			description = "Your name preference was saved.",
+			status = "success",
+		})
+	end)
+	pageLabel("roblox identity", profilePage, 4)
+	local username, displayName = getRobloxIdentity()
+	makeTextLabel({
+		Text = "Username: " .. username .. "\nDisplay name: " .. displayName,
+		TextSize = 12,
+		TextColor3 = Theme.SecondaryText,
+		Size = UDim2.new(1, 0, 0.1, 0),
+		TextWrapped = true,
+		LayoutOrder = 5,
+		ZIndex = 153,
+	}, profilePage)
+
+	---- Gemini tab ----
+	pageLabel("gemini api key", geminiPage, 1)
+	local keyInput = pageInput("Paste API key…", geminiPage, 2)
+	local keyStatus = makeTextLabel({
+		Text = #State.apiKey > 0 and ("Stored: " .. maskKey(State.apiKey)) or "No key stored.",
+		TextSize = 11,
+		TextColor3 = Theme.MutedText,
+		Size = UDim2.new(1, 0, 0.05, 0),
+		LayoutOrder = 3,
+		ZIndex = 153,
+	}, geminiPage)
+	local saveKeyBtn = pageButton("Save / Update key", geminiPage, 4, true)
+	connectSafe(saveKeyBtn.MouseButton1Click, function()
+		local k = string.gsub(keyInput.Text or "", "%s", "")
+		if #k < 8 then
+			Notifications.push({
+				title = "Key not saved",
+				description = "That doesn't look like a valid API key.",
+				status = "warning",
+			})
+			return
+		end
+		State.apiKey = k
+		saveSettings()
+		keyInput.Text = ""
+		keyStatus.Text = "Stored: " .. maskKey(k)
+		Notifications.push({
+			title = "API key saved",
+			description = "The key is stored in plain text in your executor workspace. Masking in the UI does not make local storage secure, and this file is not encrypted.",
+			status = "info",
+			duration = 8,
+		})
+		-- refresh model list with the new key
+		task.spawn(function()
+			local ids, err = fetchModels()
+			if ids then
+				State.fetchedModels = ids
+				State.modelsFetched = true
+				refreshModelDropdown()
+			elseif err then
+				Notifications.push({
+					title = "Model fetch failed",
+					description = err,
+					status = "error",
+					duration = 6,
+				})
+			end
+		end)
+	end)
+
+	pageLabel("models", geminiPage, 5)
+	local refreshModelsBtn = pageButton("Refresh model list", geminiPage, 6)
+	connectSafe(refreshModelsBtn.MouseButton1Click, function()
+		refreshModelsBtn.Text = "Fetching…"
+		task.spawn(function()
+			local ids, err = fetchModels()
+			refreshModelsBtn.Text = "Refresh model list"
+			if ids then
+				State.fetchedModels = ids
+				State.modelsFetched = true
+				refreshModelDropdown()
+				Notifications.push({
+					title = "Models updated",
+					description = tostring(#ids) .. " models support generateContent.",
+					status = "success",
+				})
+			else
+				State.modelsFetched = false
+				Notifications.push({
+					title = "Model fetch failed",
+					description = err or "Unknown error.",
+					status = "error",
+					duration = 6,
+				})
+			end
+		end)
+	end)
+
+	pageLabel("selected model", geminiPage, 7)
+	local meta = modelMeta(State.selectedModel)
+	makeTextLabel({
+		Text = modelLabel(State.selectedModel)
+			.. "\nMax output tokens: " .. tostring(meta.maxTokens)
+			.. "\nTemperature range: " .. meta.tempMin .. " – " .. meta.tempMax
+			.. "\nThinking: " .. (meta.thinking and "supported" or "not supported")
+			.. "\nStatus: " .. (State.modelStatus[State.selectedModel] == "unavailable" and "confirmed unavailable"
+				or State.modelStatus[State.selectedModel] == "ok" and "working"
+				or (State.modelsFetched == false and "failed to load (unknown)" or "unknown")),
+		TextSize = 11,
+		TextColor3 = Theme.SecondaryText,
+		TextWrapped = true,
+		Size = UDim2.new(1, 0, 0.16, 0),
+		LayoutOrder = 8,
+		ZIndex = 153,
+	}, geminiPage)
+
+	-- open on Settings tab
+	for n, p in pairs(pages) do p.Visible = (n == "Settings") end
+	tabButtons["Settings"].TextColor3 = Theme.PrimaryText
+	tabButtons["Settings"].BackgroundColor3 = Theme.SelectedBackground
+end
+
+connectSafe(SettingsButton.MouseButton1Click, openSettings)
+
+--== SECTION 14: Boot sequence ==--
+
+loadAll()
+applySidebarState(false)
+
+-- open most recent conversation or create a new one
+local ordered = sortedConversations()
+if #ordered > 0 then
+	openConversation(ordered[1].id)
+else
+	doNewChat()
+end
+
+-- Notifications
+Notifications.push({
+	title = "Welcome",
+	description = "Thank you for using Zyro AI!",
+	status = "info",
+	duration = 4.5,
+})
+do
+	local username, displayName = getRobloxIdentity()
+	Notifications.push({
+		title = "User Information",
+		description = "Executor: " .. getExecutorName()
+			.. "  |  User: " .. username
+			.. "  |  Display: " .. displayName,
+		status = "info",
+		duration = 5,
+	})
+end
+local loadingEntry = Notifications.push({
+	title = "Loading Zyro AI...",
+	description = "Loading Zyro AI by Author...",
+	status = "loading",
+	duration = 30,
+})
+task.delay(2, function()
+	Notifications.dismissEntry(loadingEntry)
+end)
+
+-- API compatibility notice (only functions the script actually uses)
+do
+	local missing = {}
+	local function need(name, present, essential)
+		if not present then
+			table.insert(missing, name .. (essential and " (ESSENTIAL)" or " (OPTIONAL)"))
+		end
+	end
+	need("request/syn.request/http_request", HttpFunc ~= nil, true)
+	need("readfile", ReadFileFn ~= nil, true)
+	need("writefile", WriteFileFn ~= nil, true)
+	need("listfiles", ListFilesFn ~= nil, false)
+	need("makefolder", MakeFolderFn ~= nil, false)
+	need("isfile", IsFileFn ~= nil, false)
+	need("setclipboard", SetClipboardFn ~= nil, false)
+	need("IdentifyExecutor", IdentifyFn ~= nil, false)
+
+	local msg
+	if #missing == 0 then
+		msg = "Missing APIs: None."
+	else
+		msg = "Missing APIs: " .. table.concat(missing, ", ") .. "."
+	end
+	Notifications.push({
+		title = "API Compatibility",
+		description = msg,
+		status = #missing == 0 and "success" or "warning",
+		duration = 7,
+	})
+end
+
+-- Fetch live models on boot if a key exists
+if #State.apiKey > 0 then
+	task.spawn(function()
+		local ids, err = fetchModels()
+		if ids then
+			State.fetchedModels = ids
+			State.modelsFetched = true
+			refreshModelDropdown()
+		else
+			State.modelsFetched = false
+		end
+	end)
+end
