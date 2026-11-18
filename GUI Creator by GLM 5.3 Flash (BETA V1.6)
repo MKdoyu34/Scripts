@@ -6,7 +6,7 @@
 local APP = "GUI Creator v1.6"
 local SAVE_DIR = "GUI_CREATOR_SAVES"
 local EXT = ".gui.json"
-local MODEL = "gemini-3.1-flash-lite"
+local MODEL = ""
 local API_DUMP = "https://raw.githubusercontent.com/MaximumADHD/Roblox-Client-Tracker/roblox/API-Dump.json"
 local MAX_BYTES, MAX_NODES, MAX_DEPTH = 2 * 1024 * 1024, 500, 32
 local Http = game:GetService("HttpService")
