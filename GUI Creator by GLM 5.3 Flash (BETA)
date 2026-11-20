@@ -1,18 +1,87 @@
---[[============================================================================
-	StudioGUI Creator v1.7 — WYSIWYG GUI Editor for Roblox (executor LocalScript)
-	NEW IN v1.7
-	• Resizable 4-panel layout: panels sit as [] [] split by a draggable |
-	  (left/right widths) plus a | between stacked panels in each column;
-	  drag left/right to grow/shrink the panel next to it.
-	• AI auto-recovery: on HTTP/think failure it runs switch-models then
-	  continue-task automatically (mid-task too), with cross-provider fallback.
-	• Code Mode agent backend (OpenCode-style: model writes Luau tool code,
-	  sandbox executes it) as fallback when native tool-calling is unsupported.
-	• NVIDIA NIM preset + any OpenAI-compatible endpoint; robust request
-	  lifecycle (timeout watchdog, generation tokens, history sanitizer) that
-	  fixes the HTTP request / "think" failure after 2+ AI responses.
-	• /commands: /help /switch-model /continue /stop /agent /codemode
-	  /autoswitch /model /clear
+Tab Resizing & Error Handling Update
+v1.7 Update:
+The Four Tabs should now be seperated in half, in " | " way so it looks like [] [] on screen, they should be resizable (width only) and to every [] there should be a | where if you hold and drag it (example used is right "[]") left, it gets bigger and right, it goes Smaller and do a Research on OpenCode docs on how APIs like NVidia, APINex, or any api has the function to run agent mode, it's called "Code Mode" I think. The bug that it should fix is the HTTP Request and Think failure when the AI chats/responses 2 times OR too much, it fails. and also add a "switch-models" tool/function for the script to Automatically call IF the AI errored and also when ur in the middle of a task and the ai just errors, it should do "switch-models" and "continue-task". also put less comments so you can generate the whole thing. 
+
+Thought Process
+I'll start by reading the full v1.6 source and researching OpenCode's agent/"Code Mode" approach in parallel.
+
+研究已经证实了关键事实：OpenCode 的 "Code Mode" 让智能体编写代码来调用工具（JS/TS API），而不是依赖原生的 tool-call 往返（Cloudflare 模式），而 NVIDIA NIM 公开了一个兼容 OpenAI 的 API，支持工具调用。现在让我完整阅读剩余的 v1.6 源码。
+
+The file is 2417 lines (~100KB). Let me read the middle and end sections in manageable chunks.
+
+The file ends abruptly at line 2418 ("-- /////////") — let me verify what's actually missing from the uploaded v1.6 source.
+
+The uploaded file is truncated at line 2418 (mid-comment banner) — the entire back half of v1.6 (selection system, toolbar, save/load, function viewer, and crucially the whole AI chat module where the reported bugs live) is missing. So I'll rebuild v1.7 completely: keep every section I have verbatim, and reconstruct the missing sections with all described v1.6 features plus the new v1.7 features (resizable [] | [] splitters, switch-models + continue-task auto-recovery, Code Mode, NVIDIA preset).
+
+Let me mark research done and start writing the script in parts.
+
+Part 1 done. Now part 2 (property system, panels, viewport input):
+
+Part 3 (exporter, selection, toolbar, save/load):
+
+Part 4 (AI core: providers, tools, Code Mode, HTTP lifecycle):
+
+Part 5 (chat UI, agent loop, auto-recovery, settings, init):
+
+现在我来修复我发现的几个问题：前向引用（handleCommand、refreshSettingsPane）、被遮蔽的 chatRefs 表、设置面板按钮被破坏，以及 p4 中的 provider schema/merge 细节。首先让我确认一下这些地方的具体代码：
+
+Applying fixes to p4 first:
+
+The file uses tabs while my edit used spaces. Let me redo with tabs:
+
+Now patching p5 (shadowed chatRefs, forward refs, add button placement):
+
+让我确认一下 p4 关键函数的签名，然后进行最后的微小修改：
+
+Now assemble the complete script and get a Luau syntax checker:
+
+One extra end somewhere. Let me find the imbalance per part with a quick block-balance scanner:
+
+The scanner over-counted (for … do counts twice). Refining it:
+
+Scanner shows the parts balance out overall, so the issue may be subtler. Let me bisect by compiling progressively:
+
+p4 is fine — the stray end is inside p5. Bisecting within p5:
+
+Found it — my earlier patch left a duplicated return out / end pair at p4 lines 598-599, which prematurely closed the AI do block. Removing the duplicates:
+
+Compiles clean. Now running the linter for real issues (ignoring expected Roblox/executor global warnings):
+
+All that is expected Roblox-global noise. Filtering for genuinely useful lint categories:
+
+Two real bugs found: the toolbar's editBtn/cgBtn closures reference their own local before it's declared (resolves to nil global at click time). Fixing:
+
+One more runtime issue to fix: runTurn keeps a stale provider reference after switch-models may have switched to a different provider. Patching:
+
+Final verification — checking every requested v1.7 feature is actually present in the assembled file:
+
+That command hung — let me verify with smaller targeted searches instead:
+
+Done — v1.7 is complete and passes a full Luau compile check. One important note first: your pasted v1.6 was cut off at line 2418 (it ends mid-banner right after the Luau Exporter — the entire AI chat, selection, toolbar, and save/load sections were missing), so I rebuilt the whole thing, keeping every intact section verbatim and reconstructing the missing half from the v1.6 feature list.
+
+Files: StudioGUI_Creator_v1.7.lua and an identical StudioGUI_Creator_v1.7.txt (~4,730 lines, minimal comments as requested).
+
+What v1.7 adds, per your list:
+
+Resizable [] | [] layout — a draggable | between the left/right halves (width-only: drag left → right panel grows, drag right → it shrinks, exactly as you described), plus a | between the stacked panels inside each column (heights). Handles highlight on hover, splits clamp to sane minimums.
+HTTP/Think failure fix — the old failure-after-2-responses pattern is defended from all sides: a 90-second watchdog that can never leave "AI is th--[[============================================================================
+        StudioGUI Creator v1.8 — WYSIWYG GUI Editor for Roblox (executor LocalScript)
+        NEW IN v1.8
+        • Layout rebuilt: ONE frame per side — [INSTANCES+AI CHAT] | [WORKSPACE
+          +PROPERTIES] — separated by a visible draggable | (width only).
+          Drag the | left and the right side gets wider, drag right and the
+          left side gets wider. No more 4 separate boxes.
+        • Naming fixed: instance numbers now scan real siblings, so after
+          deleting Frame2/Frame3 the next spawn is Frame2 again.
+        • Saving fixed: Add File = type a name, press Confirm, the file is
+          written immediately (name auto-sanitized, real errors surfaced in
+          the toast instead of failing silently).
+        • Providers fixed: strict payload (never sends null content), HTTP
+          status normalization, tool-pairing-safe history, Test button per
+          provider, Save Provider now also activates the provider.
+        • 2+ response lifecycle fixed: per-request watchdog token so the
+          "thinking" state can never wedge; switch-models + continue-task
+          auto-recovery kept (mid-task too).
 ============================================================================]]
 local function main()
 -- SERVICES & ENVIRONMENT
@@ -24,132 +93,132 @@ local RunService       = game:GetService("RunService")
 local HttpService      = game:GetService("HttpService")
 local LocalPlayer = Players.LocalPlayer
 while not LocalPlayer do
-	task.wait()
-	LocalPlayer = Players.LocalPlayer
+        task.wait()
+        LocalPlayer = Players.LocalPlayer
 end
 local PlayerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
 if not PlayerGui then
-	PlayerGui = LocalPlayer:WaitForChild("PlayerGui", 10)
+        PlayerGui = LocalPlayer:WaitForChild("PlayerGui", 10)
 end
 if not PlayerGui then
-	warn("[StudioGUI Creator] PlayerGui could not be located — aborting.")
-	return
+        warn("[StudioGUI Creator] PlayerGui could not be located — aborting.")
+        return
 end
 local function resolveProtectedParent()
-	local ok, hui = pcall(function()
-		if type(gethui) == "function" then return gethui() end
-		return nil
-	end)
-	if ok and hui then return hui end
-	local okCore, coreGui = pcall(function() return game:GetService("CoreGui") end)
-	if okCore and coreGui then return coreGui end
-	return PlayerGui
+        local ok, hui = pcall(function()
+                if type(gethui) == "function" then return gethui() end
+                return nil
+        end)
+        if ok and hui then return hui end
+        local okCore, coreGui = pcall(function() return game:GetService("CoreGui") end)
+        if okCore and coreGui then return coreGui end
+        return PlayerGui
 end
 local ProtectedParent = resolveProtectedParent()
 local PROJECT_PARENT = PlayerGui
 local protectGui
 do
-	local ok, synEnvironment = pcall(function() return syn end)
-	if ok and type(synEnvironment) == "table" and type(synEnvironment.protect_gui) == "function" then
-		protectGui = synEnvironment.protect_gui
-	end
+        local ok, synEnvironment = pcall(function() return syn end)
+        if ok and type(synEnvironment) == "table" and type(synEnvironment.protect_gui) == "function" then
+                protectGui = synEnvironment.protect_gui
+        end
 end
 local Executor = { clipboard = nil, writefile = nil, http = nil, name = "unknown" }
 do
-	Executor.clipboard = (type(setclipboard) == "function" and setclipboard)
-		or (type(toclipboard) == "function" and toclipboard) or nil
-	Executor.writefile = (type(writefile) == "function") and writefile or nil
-	pcall(function()
-		Executor.http = (type(request) == "function") and request
-			or (type(http_request) == "function") and http_request
-			or (type(syn) == "table" and type(syn.request) == "function") and syn.request
-			or (type(http) == "table" and type(http.request) == "function") and http.request
-			or nil
-	end)
-	local ok, id = pcall(function() return identifyexecutor() end)
-	if ok and type(id) == "string" and #id > 0 then Executor.name = id end
+        Executor.clipboard = (type(setclipboard) == "function" and setclipboard)
+                or (type(toclipboard) == "function" and toclipboard) or nil
+        Executor.writefile = (type(writefile) == "function") and writefile or nil
+        pcall(function()
+                Executor.http = (type(request) == "function") and request
+                        or (type(http_request) == "function") and http_request
+                        or (type(syn) == "table" and type(syn.request) == "function") and syn.request
+                        or (type(http) == "table" and type(http.request) == "function") and http.request
+                        or nil
+        end)
+        local ok, id = pcall(function() return identifyexecutor() end)
+        if ok and type(id) == "string" and #id > 0 then Executor.name = id end
 end
 local FS = {
-	readfile   = (type(readfile) == "function") and readfile or nil,
-	writefile  = (type(writefile) == "function") and writefile or nil,
-	listfiles  = (type(listfiles) == "function") and listfiles or nil,
-	isfolder   = (type(isfolder) == "function") and isfolder or nil,
-	isfile     = (type(isfile) == "function") and isfile or nil,
-	makefolder = (type(makefolder) == "function") and makefolder or nil,
-	delfile    = (type(delfile) == "function") and delfile or nil,
+        readfile   = (type(readfile) == "function") and readfile or nil,
+        writefile  = (type(writefile) == "function") and writefile or nil,
+        listfiles  = (type(listfiles) == "function") and listfiles or nil,
+        isfolder   = (type(isfolder) == "function") and isfolder or nil,
+        isfile     = (type(isfile) == "function") and isfile or nil,
+        makefolder = (type(makefolder) == "function") and makefolder or nil,
+        delfile    = (type(delfile) == "function") and delfile or nil,
 }
 local SAVE_DIR = "GUI_CREATOR_SAVES"
 -- CONFIG & THEME
 local CONFIG = {
-	WindowTitle = "StudioGUI Creator",
-	WindowSize  = Vector2.new(1020, 620),
+        WindowTitle = "StudioGUI Creator",
+        WindowSize  = Vector2.new(1020, 620),
 }
 local THEME = {
-	Window       = Color3.fromRGB(24, 24, 28),
-	Panel        = Color3.fromRGB(30, 30, 35),
-	PanelAlt     = Color3.fromRGB(37, 37, 43),
-	Control      = Color3.fromRGB(48, 48, 56),
-	ControlHover = Color3.fromRGB(60, 60, 70),
-	Stroke       = Color3.fromRGB(58, 58, 66),
-	Accent       = Color3.fromRGB(0, 120, 215),
-	Selection    = Color3.fromRGB(30, 80, 150),
-	Text         = Color3.fromRGB(232, 232, 238),
-	TextDim      = Color3.fromRGB(150, 150, 162),
-	Danger       = Color3.fromRGB(190, 62, 62),
-	Good         = Color3.fromRGB(58, 150, 88),
-	Warn         = Color3.fromRGB(200, 150, 50),
-	Handle       = Color3.fromRGB(255, 255, 255),
-	HandleStroke = Color3.fromRGB(40, 40, 45),
+        Window       = Color3.fromRGB(24, 24, 28),
+        Panel        = Color3.fromRGB(30, 30, 35),
+        PanelAlt     = Color3.fromRGB(37, 37, 43),
+        Control      = Color3.fromRGB(48, 48, 56),
+        ControlHover = Color3.fromRGB(60, 60, 70),
+        Stroke       = Color3.fromRGB(58, 58, 66),
+        Accent       = Color3.fromRGB(0, 120, 215),
+        Selection    = Color3.fromRGB(30, 80, 150),
+        Text         = Color3.fromRGB(232, 232, 238),
+        TextDim      = Color3.fromRGB(150, 150, 162),
+        Danger       = Color3.fromRGB(190, 62, 62),
+        Good         = Color3.fromRGB(58, 150, 88),
+        Warn         = Color3.fromRGB(200, 150, 50),
+        Handle       = Color3.fromRGB(255, 255, 255),
+        HandleStroke = Color3.fromRGB(40, 40, 45),
 }
 -- UTILITIES
 local function create(class, props, parent)
-	local inst = Instance.new(class)
-	if props then
-		for key, value in pairs(props) do
-			pcall(function() inst[key] = value end)
-		end
-	end
-	if parent then
-		pcall(function() inst.Parent = parent end)
-	end
-	return inst
+        local inst = Instance.new(class)
+        if props then
+                for key, value in pairs(props) do
+                        pcall(function() inst[key] = value end)
+                end
+        end
+        if parent then
+                pcall(function() inst.Parent = parent end)
+        end
+        return inst
 end
 local function trimNum(n)
-	local num = tonumber(n)
-	if not num or num ~= num then return "0" end
-	if num == math.huge then return "math.huge" end
-	if num == -math.huge then return "-math.huge" end
-	if num == math.floor(num) and math.abs(num) < 1e15 then
-		return string.format("%d", num)
-	end
-	return tostring(num)
+        local num = tonumber(n)
+        if not num or num ~= num then return "0" end
+        if num == math.huge then return "math.huge" end
+        if num == -math.huge then return "-math.huge" end
+        if num == math.floor(num) and math.abs(num) < 1e15 then
+                return string.format("%d", num)
+        end
+        return tostring(num)
 end
 local function luaQuote(s)
-	local out = tostring(s):gsub("\\", "\\\\"):gsub("\"", "\\\"")
-		:gsub("\n", "\\n"):gsub("\r", "\\r"):gsub("\t", "\\t")
-	out = out:gsub("%c", function(c) return string.format("\\%03d", string.byte(c)) end)
-	return "\"" .. out .. "\""
+        local out = tostring(s):gsub("\\", "\\\\"):gsub("\"", "\\\"")
+                :gsub("\n", "\\n"):gsub("\r", "\\r"):gsub("\t", "\\t")
+        out = out:gsub("%c", function(c) return string.format("\\%03d", string.byte(c)) end)
+        return "\"" .. out .. "\""
 end
 local function safeJsonEncode(t)
-	local ok, s = pcall(function() return HttpService:JSONEncode(t) end)
-	if ok and type(s) == "string" then return s end
-	return "{}"
+        local ok, s = pcall(function() return HttpService:JSONEncode(t) end)
+        if ok and type(s) == "string" then return s end
+        return "{}"
 end
 local defaultInstances = {}
 local function defaultInstanceOf(className)
-	local cached = defaultInstances[className]
-	if cached == nil then
-		local ok, inst = pcall(function() return Instance.new(className) end)
-		cached = ok and inst or false
-		defaultInstances[className] = cached
-	end
-	return cached or nil
+        local cached = defaultInstances[className]
+        if cached == nil then
+                local ok, inst = pcall(function() return Instance.new(className) end)
+                cached = ok and inst or false
+                defaultInstances[className] = cached
+        end
+        return cached or nil
 end
 -- CORE STATE
 local Connections = {}
 local function trackConnection(connection)
-	table.insert(Connections, connection)
-	return connection
+        table.insert(Connections, connection)
+        return connection
 end
 local Editor = {}
 local AI = {}
@@ -160,727 +229,749 @@ local explorerScroll
 local syncSelectionVisuals
 local refreshExplorerSelection
 local State = {
-	selected = nil, editMode = true, dragging = nil, resizing = nil,
-	windowDrag = nil, splitDrag = nil,
-	panelSplit = { x = 0.44, ly = 0.42, ry = 0.42 },
-	collapsed = setmetatable({}, { __mode = "k" }),
-	toolboxCollapsed = {}, nameCounters = {}, spawnCascade = 0, coreGuiMode = false,
+        selected = nil, editMode = true, dragging = nil, resizing = nil,
+        windowDrag = nil, splitDrag = nil,
+        panelSplit = { x = 0.5 },
+        collapsed = setmetatable({}, { __mode = "k" }),
+        toolboxCollapsed = {}, nameCounters = {}, spawnCascade = 0, coreGuiMode = false,
 }
 -- PROJECT REGISTRY
 local PROJECT_ATTRIBUTE = "SGC_Project"
 local function treeChildren(inst)
-	local out = {}
-	for _, child in ipairs(inst:GetChildren()) do
-		table.insert(out, child)
-	end
-	return out
+        local out = {}
+        for _, child in ipairs(inst:GetChildren()) do
+                table.insert(out, child)
+        end
+        return out
 end
 local function isProjectScreenGui(inst)
-	if typeof(inst) ~= "Instance" then return false end
-	if not inst:IsA("ScreenGui") then return false end
-	if not inst.Parent then return false end
-	return inst:GetAttribute(PROJECT_ATTRIBUTE) == true
+        if typeof(inst) ~= "Instance" then return false end
+        if not inst:IsA("ScreenGui") then return false end
+        if not inst.Parent then return false end
+        return inst:GetAttribute(PROJECT_ATTRIBUTE) == true
 end
 local function getProjectScreenGuis()
-	local found = {}
-	for _, child in ipairs(PROJECT_PARENT:GetChildren()) do
-		if isProjectScreenGui(child) then table.insert(found, child) end
-	end
-	table.sort(found, function(a, b) return a.Name < b.Name end)
-	return found
+        local found = {}
+        for _, child in ipairs(PROJECT_PARENT:GetChildren()) do
+                if isProjectScreenGui(child) then table.insert(found, child) end
+        end
+        table.sort(found, function(a, b) return a.Name < b.Name end)
+        return found
 end
-local function uniqueName(base)
-	State.nameCounters[base] = (State.nameCounters[base] or 0) + 1
-	local count = State.nameCounters[base]
-	if count == 1 then return base end
-	return base .. tostring(count)
+local function uniqueName(base, parent)
+        local holder = parent
+        if not holder then
+                local sel = State.selected
+                if sel and sel.Parent and not sel:IsA("ScreenGui") then
+                        if sel:IsA("GuiObject") or sel:IsA("Folder") then
+                                holder = sel
+                        else
+                                holder = sel:FindFirstAncestorOfClass("ScreenGui") or sel.Parent
+                        end
+                end
+        end
+        if not holder then
+                local guis = getProjectScreenGuis()
+                holder = guis[1] or PROJECT_PARENT
+        end
+        local used = {}
+        for _, child in ipairs(holder:GetChildren()) do
+                local nm = tostring(child.Name)
+                if nm == base or (nm:sub(1, #base) == base and nm:match("^%d+$", #base + 1)) then
+                        used[nm] = true
+                end
+        end
+        if not used[base] then return base end
+        local n = 2
+        while used[base .. tostring(n)] do n += 1 end
+        return base .. tostring(n)
 end
 local function createProjectScreenGui(customName)
-	local sg = create("ScreenGui", {
-		Name = customName or uniqueName("ScreenGui"),
-		ResetOnSpawn = false,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-		DisplayOrder = 50,
-	})
-	sg:SetAttribute(PROJECT_ATTRIBUTE, true)
-	sg.Parent = PROJECT_PARENT
-	return sg
+        local sg = create("ScreenGui", {
+                Name = customName or uniqueName("ScreenGui", PROJECT_PARENT),
+                ResetOnSpawn = false,
+                ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+                DisplayOrder = 50,
+        })
+        sg:SetAttribute(PROJECT_ATTRIBUTE, true)
+        sg.Parent = PROJECT_PARENT
+        return sg
 end
 local function ensureProjectIntegrity()
-	if #getProjectScreenGuis() == 0 then createProjectScreenGui() end
+        if #getProjectScreenGuis() == 0 then createProjectScreenGui() end
 end
 -- COORDINATE CALIBRATION & MOUSE HELPERS
 local InsetCompensated = false
 do
-	local probeGui = create("ScreenGui", {
-		Name = "SGC_Calibration", DisplayOrder = -1000000, ResetOnSpawn = false,
-	})
-	local probe = create("Frame", {
-		Size = UDim2.fromOffset(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0,
-	}, probeGui)
-	local ok = pcall(function() probeGui.Parent = PROJECT_PARENT end)
-	if ok then
-		task.wait()
-		pcall(function() InsetCompensated = (probe.AbsolutePosition.Y < 1) end)
-	end
-	pcall(function() probeGui:Destroy() end)
+        local probeGui = create("ScreenGui", {
+                Name = "SGC_Calibration", DisplayOrder = -1000000, ResetOnSpawn = false,
+        })
+        local probe = create("Frame", {
+                Size = UDim2.fromOffset(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0,
+        }, probeGui)
+        local ok = pcall(function() probeGui.Parent = PROJECT_PARENT end)
+        if ok then
+                task.wait()
+                pcall(function() InsetCompensated = (probe.AbsolutePosition.Y < 1) end)
+        end
+        pcall(function() probeGui:Destroy() end)
 end
 local function getGuiInset()
-	local ok, inset = pcall(GuiService.GetGuiInset, GuiService)
-	if ok and typeof(inset) == "Vector2" then return inset end
-	return Vector2.zero
+        local ok, inset = pcall(GuiService.GetGuiInset, GuiService)
+        if ok and typeof(inset) == "Vector2" then return inset end
+        return Vector2.zero
 end
 local function absToScreen(ownerScreenGui, absolutePosition)
-	if not InsetCompensated then return absolutePosition end
-	local ignoring = false
-	if ownerScreenGui then
-		pcall(function() ignoring = ownerScreenGui.IgnoreGuiInset end)
-	end
-	if ignoring then return absolutePosition end
-	return absolutePosition + getGuiInset()
+        if not InsetCompensated then return absolutePosition end
+        local ignoring = false
+        if ownerScreenGui then
+                pcall(function() ignoring = ownerScreenGui.IgnoreGuiInset end)
+        end
+        if ignoring then return absolutePosition end
+        return absolutePosition + getGuiInset()
 end
 local lastMousePos = Vector2.zero
 local function inputScreenPos(inputObject)
-	if inputObject then
-		local ok, pos = pcall(function() return inputObject.Position end)
-		if ok and typeof(pos) == "Vector2" then
-			lastMousePos = pos
-			return pos
-		end
-	end
-	local ok, pos = pcall(function() return UserInputService:GetMouseLocation() end)
-	if ok and typeof(pos) == "Vector2" then
-		lastMousePos = pos
-		return pos
-	end
-	return lastMousePos
+        if inputObject then
+                local ok, pos = pcall(function() return inputObject.Position end)
+                if ok and typeof(pos) == "Vector2" then
+                        lastMousePos = pos
+                        return pos
+                end
+        end
+        local ok, pos = pcall(function() return UserInputService:GetMouseLocation() end)
+        if ok and typeof(pos) == "Vector2" then
+                lastMousePos = pos
+                return pos
+        end
+        return lastMousePos
 end
 -- PROTECTED OVERLAY + NOTIFICATIONS
 local Overlay = create("ScreenGui", {
-	Name = "SGC_Editor", IgnoreGuiInset = true, ResetOnSpawn = false,
-	DisplayOrder = 1000000, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+        Name = "SGC_Editor", IgnoreGuiInset = true, ResetOnSpawn = false,
+        DisplayOrder = 1000000, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 })
 if protectGui then pcall(protectGui, Overlay) end
 Overlay.Parent = ProtectedParent
 local Notifications
 do
-	local holder = create("Frame", {
-		Name = "Notifications", BackgroundTransparency = 1,
-		Position = UDim2.new(0.5, -160, 0, 10), Size = UDim2.fromOffset(320, 0), ZIndex = 100,
-	}, Overlay)
-	create("UIListLayout", {
-		Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder,
-		HorizontalAlignment = Enum.HorizontalAlignment.Center,
-	}, holder)
-	local styleForKind = { info = THEME.Accent, success = THEME.Good, warn = THEME.Warn, error = THEME.Danger }
-	local toastSequence = 0
-	Notifications = {}
-	function Notifications.show(text, kind, duration)
-		local barColor = styleForKind[kind] or styleForKind.info
-		toastSequence += 1
-		local toast = create("Frame", {
-			Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = THEME.PanelAlt,
-			BorderSizePixel = 0, ZIndex = 100, LayoutOrder = toastSequence,
-		}, holder)
-		create("UICorner", { CornerRadius = UDim.new(0, 6) }, toast)
-		create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, toast)
-		create("Frame", {
-			Size = UDim2.new(0, 3, 1, -8), Position = UDim2.fromOffset(6, 4),
-			BackgroundColor3 = barColor, BorderSizePixel = 0, ZIndex = 101,
-		}, toast)
-		create("TextLabel", {
-			BackgroundTransparency = 1, Position = UDim2.fromOffset(16, 0),
-			Size = UDim2.new(1, -24, 1, 0), Text = tostring(text), TextColor3 = THEME.Text,
-			Font = Enum.Font.GothamMedium, TextSize = 13,
-			TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 101,
-		}, toast)
-		task.delay(duration or 3, function()
-			if not toast.Parent then return end
-			pcall(function()
-				TweenService:Create(toast, TweenInfo.new(0.3), { BackgroundTransparency = 1 }):Play()
-				for _, d in ipairs(toast:GetDescendants()) do
-					if d:IsA("TextLabel") then
-						TweenService:Create(d, TweenInfo.new(0.3), { TextTransparency = 1 }):Play()
-					elseif d:IsA("Frame") then
-						TweenService:Create(d, TweenInfo.new(0.3), { BackgroundTransparency = 1 }):Play()
-					elseif d:IsA("UIStroke") then
-						TweenService:Create(d, TweenInfo.new(0.3), { Transparency = 1 }):Play()
-					end
-				end
-			end)
-			task.delay(0.32, function() pcall(function() toast:Destroy() end) end)
-		end)
-		local kids = {}
-		for _, c in ipairs(holder:GetChildren()) do
-			if c:IsA("Frame") then table.insert(kids, c) end
-		end
-		while #kids > 5 do
-			local oldest = table.remove(kids, 1)
-			pcall(function() oldest:Destroy() end)
-		end
-	end
+        local holder = create("Frame", {
+                Name = "Notifications", BackgroundTransparency = 1,
+                Position = UDim2.new(0.5, -160, 0, 10), Size = UDim2.fromOffset(320, 0), ZIndex = 100,
+        }, Overlay)
+        create("UIListLayout", {
+                Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder,
+                HorizontalAlignment = Enum.HorizontalAlignment.Center,
+        }, holder)
+        local styleForKind = { info = THEME.Accent, success = THEME.Good, warn = THEME.Warn, error = THEME.Danger }
+        local toastSequence = 0
+        Notifications = {}
+        function Notifications.show(text, kind, duration)
+                local barColor = styleForKind[kind] or styleForKind.info
+                toastSequence += 1
+                local toast = create("Frame", {
+                        Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = THEME.PanelAlt,
+                        BorderSizePixel = 0, ZIndex = 100, LayoutOrder = toastSequence,
+                }, holder)
+                create("UICorner", { CornerRadius = UDim.new(0, 6) }, toast)
+                create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, toast)
+                create("Frame", {
+                        Size = UDim2.new(0, 3, 1, -8), Position = UDim2.fromOffset(6, 4),
+                        BackgroundColor3 = barColor, BorderSizePixel = 0, ZIndex = 101,
+                }, toast)
+                create("TextLabel", {
+                        BackgroundTransparency = 1, Position = UDim2.fromOffset(16, 0),
+                        Size = UDim2.new(1, -24, 1, 0), Text = tostring(text), TextColor3 = THEME.Text,
+                        Font = Enum.Font.GothamMedium, TextSize = 13,
+                        TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 101,
+                }, toast)
+                task.delay(duration or 3, function()
+                        if not toast.Parent then return end
+                        pcall(function()
+                                TweenService:Create(toast, TweenInfo.new(0.3), { BackgroundTransparency = 1 }):Play()
+                                for _, d in ipairs(toast:GetDescendants()) do
+                                        if d:IsA("TextLabel") then
+                                                TweenService:Create(d, TweenInfo.new(0.3), { TextTransparency = 1 }):Play()
+                                        elseif d:IsA("Frame") then
+                                                TweenService:Create(d, TweenInfo.new(0.3), { BackgroundTransparency = 1 }):Play()
+                                        elseif d:IsA("UIStroke") then
+                                                TweenService:Create(d, TweenInfo.new(0.3), { Transparency = 1 }):Play()
+                                        end
+                                end
+                        end)
+                        task.delay(0.32, function() pcall(function() toast:Destroy() end) end)
+                end)
+                local kids = {}
+                for _, c in ipairs(holder:GetChildren()) do
+                        if c:IsA("Frame") then table.insert(kids, c) end
+                end
+                while #kids > 5 do
+                        local oldest = table.remove(kids, 1)
+                        pcall(function() oldest:Destroy() end)
+                end
+        end
 end
 local notify = Notifications.show
 -- SELECTION VISUALS
 local Visuals = {}
 local HANDLE_LAYOUT = {
-	{ dir = "TL", ax = 0,   ay = 0   }, { dir = "T",  ax = 0.5, ay = 0   },
-	{ dir = "TR", ax = 1,   ay = 0   }, { dir = "L",  ax = 0,   ay = 0.5 },
-	{ dir = "R",  ax = 1,   ay = 0.5 }, { dir = "BL", ax = 0,   ay = 1   },
-	{ dir = "B",  ax = 0.5, ay = 1   }, { dir = "BR", ax = 1,   ay = 1   },
+        { dir = "TL", ax = 0,   ay = 0   }, { dir = "T",  ax = 0.5, ay = 0   },
+        { dir = "TR", ax = 1,   ay = 0   }, { dir = "L",  ax = 0,   ay = 0.5 },
+        { dir = "R",  ax = 1,   ay = 0.5 }, { dir = "BL", ax = 0,   ay = 1   },
+        { dir = "B",  ax = 0.5, ay = 1   }, { dir = "BR", ax = 1,   ay = 1   },
 }
 do
-	local container = create("Frame", {
-		Name = "SelectionVisuals", BackgroundTransparency = 1,
-		Size = UDim2.fromScale(1, 1), Active = false, ZIndex = 5,
-	}, Overlay)
-	local outline = create("Frame", {
-		Name = "Outline", BackgroundTransparency = 1, BorderSizePixel = 0,
-		Active = false, Visible = false, ZIndex = 5,
-	}, container)
-	create("UIStroke", { Color = THEME.Accent, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, outline)
-	local handles = {}
-	for _, mapping in ipairs(HANDLE_LAYOUT) do
-		local handle = create("Frame", {
-			Name = "Handle_" .. mapping.dir, Size = UDim2.fromOffset(8, 8),
-			AnchorPoint = Vector2.new(mapping.ax, mapping.ay),
-			BackgroundColor3 = THEME.Handle, BorderSizePixel = 0,
-			Visible = false, Active = true, ZIndex = 8,
-		}, container)
-		create("UICorner", { CornerRadius = UDim.new(0, 2) }, handle)
-		create("UIStroke", { Color = THEME.HandleStroke, Thickness = 1 }, handle)
-		handles[mapping.dir] = handle
-		handle.InputBegan:Connect(function(input)
-			if input.UserInputType == Enum.UserInputType.MouseButton1
-				or input.UserInputType == Enum.UserInputType.Touch then
-				Editor.beginResize(mapping.dir, input)
-			end
-		end)
-	end
-	local nameTag = create("TextLabel", {
-		Name = "NameTag", Size = UDim2.fromOffset(0, 18), BackgroundColor3 = THEME.PanelAlt,
-		BorderSizePixel = 0, Visible = false, Text = "", TextColor3 = THEME.Text,
-		Font = Enum.Font.GothamMedium, TextSize = 12, ZIndex = 9, AutomaticSize = Enum.AutomaticSize.X,
-	}, container)
-	create("UICorner", { CornerRadius = UDim.new(0, 4) }, nameTag)
-	create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, nameTag)
-	create("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6) }, nameTag)
-	Visuals = { container = container, outline = outline, handles = handles, nameTag = nameTag }
+        local container = create("Frame", {
+                Name = "SelectionVisuals", BackgroundTransparency = 1,
+                Size = UDim2.fromScale(1, 1), Active = false, ZIndex = 5,
+        }, Overlay)
+        local outline = create("Frame", {
+                Name = "Outline", BackgroundTransparency = 1, BorderSizePixel = 0,
+                Active = false, Visible = false, ZIndex = 5,
+        }, container)
+        create("UIStroke", { Color = THEME.Accent, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, outline)
+        local handles = {}
+        for _, mapping in ipairs(HANDLE_LAYOUT) do
+                local handle = create("Frame", {
+                        Name = "Handle_" .. mapping.dir, Size = UDim2.fromOffset(8, 8),
+                        AnchorPoint = Vector2.new(mapping.ax, mapping.ay),
+                        BackgroundColor3 = THEME.Handle, BorderSizePixel = 0,
+                        Visible = false, Active = true, ZIndex = 8,
+                }, container)
+                create("UICorner", { CornerRadius = UDim.new(0, 2) }, handle)
+                create("UIStroke", { Color = THEME.HandleStroke, Thickness = 1 }, handle)
+                handles[mapping.dir] = handle
+                handle.InputBegan:Connect(function(input)
+                        if input.UserInputType == Enum.UserInputType.MouseButton1
+                                or input.UserInputType == Enum.UserInputType.Touch then
+                                Editor.beginResize(mapping.dir, input)
+                        end
+                end)
+        end
+        local nameTag = create("TextLabel", {
+                Name = "NameTag", Size = UDim2.fromOffset(0, 18), BackgroundColor3 = THEME.PanelAlt,
+                BorderSizePixel = 0, Visible = false, Text = "", TextColor3 = THEME.Text,
+                Font = Enum.Font.GothamMedium, TextSize = 12, ZIndex = 9, AutomaticSize = Enum.AutomaticSize.X,
+        }, container)
+        create("UICorner", { CornerRadius = UDim.new(0, 4) }, nameTag)
+        create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, nameTag)
+        create("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6) }, nameTag)
+        Visuals = { container = container, outline = outline, handles = handles, nameTag = nameTag }
 end
 local function ownerScreenGuiOf(inst)
-	if inst:IsA("ScreenGui") then return inst end
-	return inst:FindFirstAncestorOfClass("ScreenGui")
+        if inst:IsA("ScreenGui") then return inst end
+        return inst:FindFirstAncestorOfClass("ScreenGui")
 end
 syncSelectionVisuals = function()
-	local sel = State.selected
-	local show = sel ~= nil and sel.Parent ~= nil and State.editMode
-	Visuals.container.Visible = show
-	if not show then return end
-	pcall(function()
-		local boundsTarget = sel:IsA("GuiObject") and sel or sel.Parent
-		if not boundsTarget then
-			Visuals.container.Visible = false
-			return
-		end
-		local sg = ownerScreenGuiOf(boundsTarget)
-		local origin = absToScreen(sg, boundsTarget.AbsolutePosition)
-		local size = boundsTarget.AbsoluteSize
-		Visuals.outline.Visible = true
-		Visuals.outline.Position = UDim2.fromOffset(origin.X, origin.Y)
-		Visuals.outline.Size = UDim2.fromOffset(size.X, size.Y)
-		local canManipulate = sel:IsA("GuiObject")
-		for _, mapping in ipairs(HANDLE_LAYOUT) do
-			local handle = Visuals.handles[mapping.dir]
-			handle.Visible = canManipulate
-			if canManipulate then
-				handle.Position = UDim2.fromOffset(origin.X + size.X * mapping.ax, origin.Y + size.Y * mapping.ay)
-			end
-		end
-		Visuals.nameTag.Visible = true
-		Visuals.nameTag.Text = sel.ClassName .. "  ·  " .. sel.Name
-		local tagY = origin.Y - 24
-		if tagY < 2 then tagY = origin.Y + size.Y + 6 end
-		Visuals.nameTag.Position = UDim2.fromOffset(origin.X, tagY)
-	end)
+        local sel = State.selected
+        local show = sel ~= nil and sel.Parent ~= nil and State.editMode
+        Visuals.container.Visible = show
+        if not show then return end
+        pcall(function()
+                local boundsTarget = sel:IsA("GuiObject") and sel or sel.Parent
+                if not boundsTarget then
+                        Visuals.container.Visible = false
+                        return
+                end
+                local sg = ownerScreenGuiOf(boundsTarget)
+                local origin = absToScreen(sg, boundsTarget.AbsolutePosition)
+                local size = boundsTarget.AbsoluteSize
+                Visuals.outline.Visible = true
+                Visuals.outline.Position = UDim2.fromOffset(origin.X, origin.Y)
+                Visuals.outline.Size = UDim2.fromOffset(size.X, size.Y)
+                local canManipulate = sel:IsA("GuiObject")
+                for _, mapping in ipairs(HANDLE_LAYOUT) do
+                        local handle = Visuals.handles[mapping.dir]
+                        handle.Visible = canManipulate
+                        if canManipulate then
+                                handle.Position = UDim2.fromOffset(origin.X + size.X * mapping.ax, origin.Y + size.Y * mapping.ay)
+                        end
+                end
+                Visuals.nameTag.Visible = true
+                Visuals.nameTag.Text = sel.ClassName .. "  ·  " .. sel.Name
+                local tagY = origin.Y - 24
+                if tagY < 2 then tagY = origin.Y + size.Y + 6 end
+                Visuals.nameTag.Position = UDim2.fromOffset(origin.X, tagY)
+        end)
 end
 local function isOverHandle(screenPos)
-	local sel = State.selected
-	if not sel or not sel.Parent or not sel:IsA("GuiObject") or not State.editMode then return false end
-	for _, handle in pairs(Visuals.handles) do
-		if handle.Visible then
-			local ok, ap, as = pcall(function() return handle.AbsolutePosition, handle.AbsoluteSize end)
-			if ok and ap and as
-				and screenPos.X >= ap.X - 3 and screenPos.X <= ap.X + as.X + 3
-				and screenPos.Y >= ap.Y - 3 and screenPos.Y <= ap.Y + as.Y + 3 then
-				return true
-			end
-		end
-	end
-	return false
+        local sel = State.selected
+        if not sel or not sel.Parent or not sel:IsA("GuiObject") or not State.editMode then return false end
+        for _, handle in pairs(Visuals.handles) do
+                if handle.Visible then
+                        local ok, ap, as = pcall(function() return handle.AbsolutePosition, handle.AbsoluteSize end)
+                        if ok and ap and as
+                                and screenPos.X >= ap.X - 3 and screenPos.X <= ap.X + as.X + 3
+                                and screenPos.Y >= ap.Y - 3 and screenPos.Y <= ap.Y + as.Y + 3 then
+                                return true
+                        end
+                end
+        end
+        return false
 end
--- MAIN WINDOW (4 panels + resizable [] | [] splitters)
+-- MAIN WINDOW ([] [] — one frame per side, visible | divider, width-only drag)
 local UI = { windows = {} }
 do
-	local main = create("Frame", {
-		Name = "MainWindow", Size = UDim2.fromOffset(CONFIG.WindowSize.X, CONFIG.WindowSize.Y),
-		Position = UDim2.fromOffset(60, 110), BackgroundColor3 = THEME.Window,
-		BorderSizePixel = 0, Active = true, ZIndex = 10,
-	}, Overlay)
-	create("UICorner", { CornerRadius = UDim.new(0, 8) }, main)
-	create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, main)
-	do
-		local ok, viewport = pcall(function() return workspace.CurrentCamera.ViewportSize end)
-		if ok and viewport then
-			local x = math.clamp((viewport.X - CONFIG.WindowSize.X) / 2, 8, math.max(8, viewport.X - CONFIG.WindowSize.X - 8))
-			local y = math.clamp((viewport.Y - CONFIG.WindowSize.Y) / 2, 8, math.max(8, viewport.Y - CONFIG.WindowSize.Y - 8))
-			main.Position = UDim2.fromOffset(math.floor(x), math.floor(y))
-		end
-	end
-	local titleBar = create("Frame", {
-		Name = "TitleBar", Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = THEME.PanelAlt,
-		BorderSizePixel = 0, Active = true, ZIndex = 11,
-	}, main)
-	create("UICorner", { CornerRadius = UDim.new(0, 8) }, titleBar)
-	local titleIcon = create("Frame", {
-		Size = UDim2.fromOffset(10, 10), Position = UDim2.fromOffset(12, 11),
-		BackgroundColor3 = THEME.Accent, BorderSizePixel = 0, ZIndex = 12,
-	}, titleBar)
-	create("UICorner", { CornerRadius = UDim.new(0, 3) }, titleIcon)
-	create("TextLabel", {
-		BackgroundTransparency = 1, Position = UDim2.fromOffset(30, 0),
-		Size = UDim2.new(1, -120, 1, 0), Text = CONFIG.WindowTitle .. "  v1.7  —  " .. Executor.name,
-		TextColor3 = THEME.Text, Font = Enum.Font.GothamMedium, TextSize = 13,
-		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 12,
-	}, titleBar)
-	local function windowButton(text, offsetX, onClick, textColor)
-		local btn = create("TextButton", {
-			Size = UDim2.fromOffset(26, 20), Position = UDim2.new(1, offsetX, 0.5, -10),
-			BackgroundColor3 = THEME.Control, BorderSizePixel = 0, Text = text,
-			TextColor3 = textColor or THEME.TextDim, Font = Enum.Font.GothamBold,
-			TextSize = 12, AutoButtonColor = false, ZIndex = 12,
-		}, titleBar)
-		create("UICorner", { CornerRadius = UDim.new(0, 4) }, btn)
-		btn.MouseEnter:Connect(function() btn.BackgroundColor3 = THEME.ControlHover end)
-		btn.MouseLeave:Connect(function() btn.BackgroundColor3 = THEME.Control end)
-		btn.Activated:Connect(onClick)
-		return btn
-	end
-	local bodyAndStatus = {}
-	local minimized = false
-	windowButton("–", -64, function()
-		minimized = not minimized
-		for _, frame in ipairs(bodyAndStatus) do frame.Visible = not minimized end
-		main.Size = minimized
-			and UDim2.fromOffset(CONFIG.WindowSize.X, 32)
-			or UDim2.fromOffset(CONFIG.WindowSize.X, CONFIG.WindowSize.Y)
-	end, THEME.Text)
-	windowButton("×", -34, function() Editor.destroy() end, THEME.Text)
-	titleBar.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1
-			or input.UserInputType == Enum.UserInputType.Touch then
-			State.windowDrag = { startMouse = inputScreenPos(input), startPosition = main.Position }
-		end
-	end)
-	local body = create("Frame", {
-		Name = "Body", Position = UDim2.fromOffset(0, 32), Size = UDim2.new(1, 0, 1, -56),
-		BackgroundTransparency = 1, ZIndex = 11,
-	}, main)
-	table.insert(bodyAndStatus, body)
-	local toolbar = create("Frame", {
-		Name = "Toolbar", Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = THEME.Panel,
-		BorderSizePixel = 0, ZIndex = 11,
-	}, body)
-	create("UIListLayout", {
-		FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6),
-		SortOrder = Enum.SortOrder.LayoutOrder, VerticalAlignment = Enum.VerticalAlignment.Center,
-	}, toolbar)
-	create("UIPadding", { PaddingLeft = UDim.new(0, 8) }, toolbar)
-	local function makeToolbarButton(text, onClick, options)
-		options = options or {}
-		local btn = create("TextButton", {
-			Size = UDim2.fromOffset(options.width or 80, 24),
-			BackgroundColor3 = options.accent and THEME.Accent or THEME.Control,
-			BorderSizePixel = 0, Text = text, TextColor3 = THEME.Text,
-			Font = Enum.Font.GothamMedium, TextSize = 12, AutoButtonColor = false,
-			ZIndex = 12, LayoutOrder = options.order or 0,
-		}, toolbar)
-		create("UICorner", { CornerRadius = UDim.new(0, 5) }, btn)
-		if not options.accent then
-			create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, btn)
-		end
-		btn.MouseEnter:Connect(function()
-			btn.BackgroundColor3 = options.accent and THEME.Accent or THEME.ControlHover
-		end)
-		btn.MouseLeave:Connect(function()
-			btn.BackgroundColor3 = options.accent and THEME.Accent or THEME.Control
-		end)
-		btn.Activated:Connect(onClick)
-		return btn
-	end
-	UI.makeToolbarButton = makeToolbarButton
-	UI.toolbar = toolbar
-	local columns = create("Frame", {
-		Name = "Columns", Position = UDim2.fromOffset(0, 36), Size = UDim2.new(1, 0, 1, -36),
-		BackgroundTransparency = 1, ZIndex = 11,
-	}, body)
-	UI.columns = columns
-	local function makePanel(name)
-		local f = create("Frame", {
-			Name = name, BackgroundColor3 = THEME.Panel, BorderSizePixel = 0, ZIndex = 11,
-		}, columns)
-		create("UICorner", { CornerRadius = UDim.new(0, 6) }, f)
-		create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, f)
-		return f
-	end
-	local instancesColumn   = makePanel("InstancesPanel")
-	local chatColumn        = makePanel("ChatPanel")
-	local workspaceColumn   = makePanel("WorkspacePanel")
-	local propertiesColumn  = makePanel("PropertiesPanel")
-	local splitterBars = {}
-	local function makeSplitter(name, isHorizontal, apply)
-		local grab = create("TextButton", {
-			Name = name, AutoButtonColor = false, Text = "", BackgroundTransparency = 1,
-			BorderSizePixel = 0, Active = true, ZIndex = 14,
-		}, columns)
-		local bar = create("Frame", {
-			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
-			BackgroundColor3 = THEME.Control, BorderSizePixel = 0, ZIndex = 14,
-		}, grab)
-		create("UICorner", { CornerRadius = UDim.new(1, 0) }, bar)
-		if isHorizontal then
-			bar.Size = UDim2.new(1, -28, 0, 2)
-		else
-			bar.Size = UDim2.new(0, 2, 1, -28)
-		end
-		table.insert(splitterBars, bar)
-		grab.MouseEnter:Connect(function() bar.BackgroundColor3 = THEME.Accent end)
-		grab.MouseLeave:Connect(function()
-			if not (State.splitDrag and State.splitDrag.bar == bar) then
-				bar.BackgroundColor3 = THEME.Control
-			end
-		end)
-		grab.InputBegan:Connect(function(input)
-			if input.UserInputType == Enum.UserInputType.MouseButton1
-				or input.UserInputType == Enum.UserInputType.Touch then
-				State.splitDrag = { apply = apply, bar = bar }
-				bar.BackgroundColor3 = THEME.Accent
-			end
-		end)
-		return grab, bar
-	end
-	local function relayout()
-		local W, H = columns.AbsoluteSize.X, columns.AbsoluteSize.Y
-		if W < 80 or H < 80 then return end
-		local s = State.panelSplit
-		local lw = math.floor(W * math.clamp(s.x, 0.18, 0.82))
-		local ltH = math.floor(H * math.clamp(s.ly, 0.12, 0.88))
-		local rtH = math.floor(H * math.clamp(s.ry, 0.12, 0.88))
-		instancesColumn.Position = UDim2.fromOffset(6, 0)
-		instancesColumn.Size = UDim2.new(0, lw - 17, 0, ltH - 5)
-		chatColumn.Position = UDim2.fromOffset(6, ltH + 5)
-		chatColumn.Size = UDim2.new(0, lw - 17, 0, H - ltH - 11)
-		workspaceColumn.Position = UDim2.fromOffset(lw + 11, 0)
-		workspaceColumn.Size = UDim2.new(0, W - lw - 17, 0, rtH - 5)
-		propertiesColumn.Position = UDim2.fromOffset(lw + 11, rtH + 5)
-		propertiesColumn.Size = UDim2.new(0, W - lw - 17, 0, H - rtH - 11)
-	end
-	makeSplitter("SplitLeft", true, function(_, my)
-		local s = State.panelSplit
-		s.ly = (my - columns.AbsolutePosition.Y) / math.max(columns.AbsoluteSize.Y, 1)
-		relayout()
-	end)
-	makeSplitter("SplitRight", true, function(_, my)
-		local s = State.panelSplit
-		s.ry = (my - columns.AbsolutePosition.Y) / math.max(columns.AbsoluteSize.Y, 1)
-		relayout()
-	end)
-	makeSplitter("SplitMain", false, function(mx, _)
-		local s = State.panelSplit
-		s.x = (mx - columns.AbsolutePosition.X) / math.max(columns.AbsoluteSize.X, 1)
-		relayout()
-	end)
-	UI.relayout = relayout
-	trackConnection(columns:GetPropertyChangedSignal("AbsoluteSize"):Connect(relayout))
-	trackConnection(UserInputService.InputChanged:Connect(function(input)
-		if not State.splitDrag then return end
-		local pos = inputScreenPos(input)
-		State.splitDrag.apply(pos.X, pos.Y)
-	end))
-	trackConnection(UserInputService.InputEnded:Connect(function(input)
-		local t = input.UserInputType
-		if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
-			if State.splitDrag then
-				State.splitDrag.bar.BackgroundColor3 = THEME.Control
-				State.splitDrag = nil
-			end
-		end
-	end))
-	task.defer(relayout)
-	local function makeColumnHeader(parent, title)
-		local header = create("Frame", {
-			Size = UDim2.new(1, 0, 0, 24), BackgroundColor3 = THEME.PanelAlt,
-			BorderSizePixel = 0, ZIndex = 12,
-		}, parent)
-		create("TextLabel", {
-			Size = UDim2.new(1, -8, 1, 0), Position = UDim2.fromOffset(8, 0),
-			BackgroundTransparency = 1, Text = title, TextColor3 = THEME.TextDim,
-			Font = Enum.Font.GothamBold, TextSize = 11,
-			TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 13,
-		}, header)
-		return header
-	end
-	local function makeScrollList(parent, topOffset)
-		local scroll = create("ScrollingFrame", {
-			Position = UDim2.fromOffset(0, topOffset or 24),
-			Size = UDim2.new(1, 0, 1, -(topOffset or 24)),
-			BackgroundTransparency = 1, BorderSizePixel = 0, CanvasSize = UDim2.new(),
-			AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y,
-			ScrollBarThickness = 4, ScrollBarImageColor3 = THEME.ControlHover,
-			ElasticBehavior = Enum.ElasticBehavior.Never, ZIndex = 12,
-		}, parent)
-		create("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, scroll)
-		create("UIPadding", {
-			PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 6),
-			PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 6),
-		}, scroll)
-		return scroll
-	end
-	local statusBar = create("Frame", {
-		AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 0, 1, 0),
-		Size = UDim2.new(1, 0, 0, 24), BackgroundColor3 = THEME.PanelAlt, BorderSizePixel = 0, ZIndex = 11,
-	}, main)
-	table.insert(bodyAndStatus, statusBar)
-	local statusLeft = create("TextLabel", {
-		BackgroundTransparency = 1, Position = UDim2.fromOffset(8, 0), Size = UDim2.new(0.62, 0, 1, 0),
-		Text = "", TextColor3 = THEME.TextDim, Font = Enum.Font.Gotham, TextSize = 11,
-		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 12,
-	}, statusBar)
-	local statusRight = create("TextLabel", {
-		BackgroundTransparency = 1, AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 0),
-		Size = UDim2.new(0.36, 0, 1, 0), Text = "No selection", TextColor3 = THEME.Text,
-		Font = Enum.Font.GothamMedium, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Right,
-		TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 12,
-	}, statusBar)
-	UI.main = main
-	UI.windows = { main }
-	UI.statusLeft = statusLeft
-	UI.statusRight = statusRight
-	UI.instancesColumn = instancesColumn
-	UI.chatColumn = chatColumn
-	UI.workspaceColumn = workspaceColumn
-	UI.propertiesColumn = propertiesColumn
-	UI.makeColumnHeader = makeColumnHeader
-	UI.makeScrollList = makeScrollList
-	UI.makeColumnHeader(instancesColumn, "INSTANCES")
-	UI.makeColumnHeader(workspaceColumn, "WORKSPACE")
-	UI.makeColumnHeader(propertiesColumn, "PROPERTIES")
-	local chatHeader = UI.makeColumnHeader(chatColumn, "AI CHAT")
-	local function chatHeaderButton(text, offsetX, width, onClick)
-		local btn = create("TextButton", {
-			Size = UDim2.fromOffset(width, 18), Position = UDim2.new(1, offsetX, 0.5, -9),
-			BackgroundColor3 = THEME.Control, BorderSizePixel = 0, Text = text,
-			TextColor3 = THEME.Text, Font = Enum.Font.GothamMedium, TextSize = 10,
-			AutoButtonColor = false, ZIndex = 14,
-		}, chatHeader)
-		create("UICorner", { CornerRadius = UDim.new(0, 4) }, btn)
-		btn.Activated:Connect(onClick)
-		return btn
-	end
-	UI.chatHeaderButton = chatHeaderButton
-	UI.modelBtn = chatHeaderButton("Model", -196, 64, function() AI.showModelPopup() end)
-	chatHeaderButton("Providers", -124, 56, function() Editor.openAISettings() end)
-	chatHeaderButton("Clear", -62, 44, function() Editor.clearAIChat() end)
+        local main = create("Frame", {
+                Name = "MainWindow", Size = UDim2.fromOffset(CONFIG.WindowSize.X, CONFIG.WindowSize.Y),
+                Position = UDim2.fromOffset(60, 110), BackgroundColor3 = THEME.Window,
+                BorderSizePixel = 0, Active = true, ZIndex = 10,
+        }, Overlay)
+        create("UICorner", { CornerRadius = UDim.new(0, 8) }, main)
+        create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, main)
+        do
+                local ok, viewport = pcall(function() return workspace.CurrentCamera.ViewportSize end)
+                if ok and viewport then
+                        local x = math.clamp((viewport.X - CONFIG.WindowSize.X) / 2, 8, math.max(8, viewport.X - CONFIG.WindowSize.X - 8))
+                        local y = math.clamp((viewport.Y - CONFIG.WindowSize.Y) / 2, 8, math.max(8, viewport.Y - CONFIG.WindowSize.Y - 8))
+                        main.Position = UDim2.fromOffset(math.floor(x), math.floor(y))
+                end
+        end
+        local titleBar = create("Frame", {
+                Name = "TitleBar", Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = THEME.PanelAlt,
+                BorderSizePixel = 0, Active = true, ZIndex = 11,
+        }, main)
+        create("UICorner", { CornerRadius = UDim.new(0, 8) }, titleBar)
+        local titleIcon = create("Frame", {
+                Size = UDim2.fromOffset(10, 10), Position = UDim2.fromOffset(12, 11),
+                BackgroundColor3 = THEME.Accent, BorderSizePixel = 0, ZIndex = 12,
+        }, titleBar)
+        create("UICorner", { CornerRadius = UDim.new(0, 3) }, titleIcon)
+        create("TextLabel", {
+                BackgroundTransparency = 1, Position = UDim2.fromOffset(30, 0),
+                Size = UDim2.new(1, -120, 1, 0), Text = CONFIG.WindowTitle .. "  v1.8  —  " .. Executor.name,
+                TextColor3 = THEME.Text, Font = Enum.Font.GothamMedium, TextSize = 13,
+                TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 12,
+        }, titleBar)
+        local function windowButton(text, offsetX, onClick, textColor)
+                local btn = create("TextButton", {
+                        Size = UDim2.fromOffset(26, 20), Position = UDim2.new(1, offsetX, 0.5, -10),
+                        BackgroundColor3 = THEME.Control, BorderSizePixel = 0, Text = text,
+                        TextColor3 = textColor or THEME.TextDim, Font = Enum.Font.GothamBold,
+                        TextSize = 12, AutoButtonColor = false, ZIndex = 12,
+                }, titleBar)
+                create("UICorner", { CornerRadius = UDim.new(0, 4) }, btn)
+                btn.MouseEnter:Connect(function() btn.BackgroundColor3 = THEME.ControlHover end)
+                btn.MouseLeave:Connect(function() btn.BackgroundColor3 = THEME.Control end)
+                btn.Activated:Connect(onClick)
+                return btn
+        end
+        local bodyAndStatus = {}
+        local minimized = false
+        windowButton("–", -64, function()
+                minimized = not minimized
+                for _, frame in ipairs(bodyAndStatus) do frame.Visible = not minimized end
+                main.Size = minimized
+                        and UDim2.fromOffset(CONFIG.WindowSize.X, 32)
+                        or UDim2.fromOffset(CONFIG.WindowSize.X, CONFIG.WindowSize.Y)
+        end, THEME.Text)
+        windowButton("×", -34, function() Editor.destroy() end, THEME.Text)
+        titleBar.InputBegan:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1
+                        or input.UserInputType == Enum.UserInputType.Touch then
+                        State.windowDrag = { startMouse = inputScreenPos(input), startPosition = main.Position }
+                end
+        end)
+        local body = create("Frame", {
+                Name = "Body", Position = UDim2.fromOffset(0, 32), Size = UDim2.new(1, 0, 1, -56),
+                BackgroundTransparency = 1, ZIndex = 11,
+        }, main)
+        table.insert(bodyAndStatus, body)
+        local toolbar = create("Frame", {
+                Name = "Toolbar", Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = THEME.Panel,
+                BorderSizePixel = 0, ZIndex = 11,
+        }, body)
+        create("UIListLayout", {
+                FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6),
+                SortOrder = Enum.SortOrder.LayoutOrder, VerticalAlignment = Enum.VerticalAlignment.Center,
+        }, toolbar)
+        create("UIPadding", { PaddingLeft = UDim.new(0, 8) }, toolbar)
+        local function makeToolbarButton(text, onClick, options)
+                options = options or {}
+                local btn = create("TextButton", {
+                        Size = UDim2.fromOffset(options.width or 80, 24),
+                        BackgroundColor3 = options.accent and THEME.Accent or THEME.Control,
+                        BorderSizePixel = 0, Text = text, TextColor3 = THEME.Text,
+                        Font = Enum.Font.GothamMedium, TextSize = 12, AutoButtonColor = false,
+                        ZIndex = 12, LayoutOrder = options.order or 0,
+                }, toolbar)
+                create("UICorner", { CornerRadius = UDim.new(0, 5) }, btn)
+                if not options.accent then
+                        create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, btn)
+                end
+                btn.MouseEnter:Connect(function()
+                        btn.BackgroundColor3 = options.accent and THEME.Accent or THEME.ControlHover
+                end)
+                btn.MouseLeave:Connect(function()
+                        btn.BackgroundColor3 = options.accent and THEME.Accent or THEME.Control
+                end)
+                btn.Activated:Connect(onClick)
+                return btn
+        end
+        UI.makeToolbarButton = makeToolbarButton
+        UI.toolbar = toolbar
+        local columns = create("Frame", {
+                Name = "Columns", Position = UDim2.fromOffset(0, 36), Size = UDim2.new(1, 0, 1, -36),
+                BackgroundTransparency = 1, ZIndex = 11,
+        }, body)
+        UI.columns = columns
+        local function sideFrame(name)
+                local f = create("Frame", {
+                        Name = name, BackgroundColor3 = THEME.Panel, BorderSizePixel = 0, ZIndex = 11,
+                }, columns)
+                create("UICorner", { CornerRadius = UDim.new(0, 6) }, f)
+                create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, f)
+                return f
+        end
+        local leftFrame = sideFrame("LeftFrame")
+        local rightFrame = sideFrame("RightFrame")
+        local function makeSection(side, name)
+                return create("Frame", {
+                        Name = name, BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 12,
+                }, side)
+        end
+        local instancesColumn  = makeSection(leftFrame, "InstancesSection")
+        local chatColumn       = makeSection(leftFrame, "ChatSection")
+        local workspaceColumn  = makeSection(rightFrame, "WorkspaceSection")
+        local propertiesColumn = makeSection(rightFrame, "PropertiesSection")
+        local grab = create("TextButton", {
+                Name = "WidthSplitter", AutoButtonColor = false, Text = "", BackgroundTransparency = 1,
+                BorderSizePixel = 0, Active = true, ZIndex = 14,
+        }, columns)
+        local bar = create("Frame", {
+                AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+                Size = UDim2.new(0, 4, 1, -28), BackgroundColor3 = THEME.Control, BorderSizePixel = 0, ZIndex = 14,
+        }, grab)
+        create("UICorner", { CornerRadius = UDim.new(1, 0) }, bar)
+        for i = 0, 2 do
+                create("Frame", {
+                        AnchorPoint = Vector2.new(0.5, 0.5),
+                        Position = UDim2.new(0.5, 0, 0.5, (i - 1) * 8),
+                        Size = UDim2.fromOffset(2, 2), BackgroundColor3 = THEME.TextDim,
+                        BorderSizePixel = 0, ZIndex = 15,
+                }, bar)
+        end
+        local function relayout()
+                local W, H = columns.AbsoluteSize.X, columns.AbsoluteSize.Y
+                if W < 120 or H < 80 then return end
+                local s = State.panelSplit
+                local lw = math.floor(W * math.clamp(s.x, 0.15, 0.85))
+                grab.Position = UDim2.fromOffset(lw - 7, 0)
+                grab.Size = UDim2.new(0, 14, 1, 0)
+                leftFrame.Position = UDim2.fromOffset(2, 0)
+                leftFrame.Size = UDim2.new(0, lw - 10, 1, 0)
+                rightFrame.Position = UDim2.fromOffset(lw + 8, 0)
+                rightFrame.Size = UDim2.new(0, W - lw - 10, 1, 0)
+                local topH = math.floor(H * 0.45)
+                instancesColumn.Position = UDim2.fromOffset(0, 0)
+                instancesColumn.Size = UDim2.new(1, 0, 0, topH - 2)
+                chatColumn.Position = UDim2.fromOffset(0, topH + 2)
+                chatColumn.Size = UDim2.new(1, 0, 1, -(topH + 4))
+                workspaceColumn.Position = UDim2.fromOffset(0, 0)
+                workspaceColumn.Size = UDim2.new(1, 0, 0, topH - 2)
+                propertiesColumn.Position = UDim2.fromOffset(0, topH + 2)
+                propertiesColumn.Size = UDim2.new(1, 0, 1, -(topH + 4))
+        end
+        local function applySplit(mx, _)
+                local s = State.panelSplit
+                s.x = (mx - columns.AbsolutePosition.X) / math.max(columns.AbsoluteSize.X, 1)
+                relayout()
+        end
+        grab.MouseEnter:Connect(function() bar.BackgroundColor3 = THEME.Accent end)
+        grab.MouseLeave:Connect(function()
+                if not (State.splitDrag and State.splitDrag.bar == bar) then
+                        bar.BackgroundColor3 = THEME.Control
+                end
+        end)
+        grab.InputBegan:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1
+                        or input.UserInputType == Enum.UserInputType.Touch then
+                        State.splitDrag = { apply = applySplit, bar = bar }
+                        bar.BackgroundColor3 = THEME.Accent
+                end
+        end)
+        UI.relayout = relayout
+        trackConnection(columns:GetPropertyChangedSignal("AbsoluteSize"):Connect(relayout))
+        trackConnection(UserInputService.InputChanged:Connect(function(input)
+                if not State.splitDrag then return end
+                local pos = inputScreenPos(input)
+                State.splitDrag.apply(pos.X, pos.Y)
+        end))
+        trackConnection(UserInputService.InputEnded:Connect(function(input)
+                local t = input.UserInputType
+                if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
+                        if State.splitDrag then
+                                State.splitDrag.bar.BackgroundColor3 = THEME.Control
+                                State.splitDrag = nil
+                        end
+                end
+        end))
+        task.defer(relayout)
+        local function makeColumnHeader(parent, title)
+                local header = create("Frame", {
+                        Size = UDim2.new(1, 0, 0, 24), BackgroundColor3 = THEME.PanelAlt,
+                        BorderSizePixel = 0, ZIndex = 12,
+                }, parent)
+                create("TextLabel", {
+                        Size = UDim2.new(1, -8, 1, 0), Position = UDim2.fromOffset(8, 0),
+                        BackgroundTransparency = 1, Text = title, TextColor3 = THEME.TextDim,
+                        Font = Enum.Font.GothamBold, TextSize = 11,
+                        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 13,
+                }, header)
+                return header
+        end
+        local function makeScrollList(parent, topOffset)
+                local scroll = create("ScrollingFrame", {
+                        Position = UDim2.fromOffset(0, topOffset or 24),
+                        Size = UDim2.new(1, 0, 1, -(topOffset or 24)),
+                        BackgroundTransparency = 1, BorderSizePixel = 0, CanvasSize = UDim2.new(),
+                        AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y,
+                        ScrollBarThickness = 4, ScrollBarImageColor3 = THEME.ControlHover,
+                        ElasticBehavior = Enum.ElasticBehavior.Never, ZIndex = 12,
+                }, parent)
+                create("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, scroll)
+                create("UIPadding", {
+                        PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 6),
+                        PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 6),
+                }, scroll)
+                return scroll
+        end
+        local statusBar = create("Frame", {
+                AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 0, 1, 0),
+                Size = UDim2.new(1, 0, 0, 24), BackgroundColor3 = THEME.PanelAlt, BorderSizePixel = 0, ZIndex = 11,
+        }, main)
+        table.insert(bodyAndStatus, statusBar)
+        local statusLeft = create("TextLabel", {
+                BackgroundTransparency = 1, Position = UDim2.fromOffset(8, 0), Size = UDim2.new(0.62, 0, 1, 0),
+                Text = "", TextColor3 = THEME.TextDim, Font = Enum.Font.Gotham, TextSize = 11,
+                TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 12,
+        }, statusBar)
+        local statusRight = create("TextLabel", {
+                BackgroundTransparency = 1, AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 0),
+                Size = UDim2.new(0.36, 0, 1, 0), Text = "No selection", TextColor3 = THEME.Text,
+                Font = Enum.Font.GothamMedium, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Right,
+                TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 12,
+        }, statusBar)
+        UI.main = main
+        UI.windows = { main }
+        UI.statusLeft = statusLeft
+        UI.statusRight = statusRight
+        UI.instancesColumn = instancesColumn
+        UI.chatColumn = chatColumn
+        UI.workspaceColumn = workspaceColumn
+        UI.propertiesColumn = propertiesColumn
+        UI.makeColumnHeader = makeColumnHeader
+        UI.makeScrollList = makeScrollList
+        UI.makeColumnHeader(instancesColumn, "INSTANCES")
+        UI.makeColumnHeader(workspaceColumn, "WORKSPACE")
+        UI.makeColumnHeader(propertiesColumn, "PROPERTIES")
+        local chatHeader = UI.makeColumnHeader(chatColumn, "AI CHAT")
+        local function chatHeaderButton(text, offsetX, width, onClick)
+                local btn = create("TextButton", {
+                        Size = UDim2.fromOffset(width, 18), Position = UDim2.new(1, offsetX, 0.5, -9),
+                        BackgroundColor3 = THEME.Control, BorderSizePixel = 0, Text = text,
+                        TextColor3 = THEME.Text, Font = Enum.Font.GothamMedium, TextSize = 10,
+                        AutoButtonColor = false, ZIndex = 14,
+                }, chatHeader)
+                create("UICorner", { CornerRadius = UDim.new(0, 4) }, btn)
+                btn.Activated:Connect(onClick)
+                return btn
+        end
+        UI.chatHeaderButton = chatHeaderButton
+        UI.modelBtn = chatHeaderButton("Model", -196, 64, function() AI.showModelPopup() end)
+        chatHeaderButton("Providers", -124, 56, function() Editor.openAISettings() end)
+        chatHeaderButton("Clear", -62, 44, function() Editor.clearAIChat() end)
 end
 -- GENERIC POPUP (enums, booleans, models, thinking, compat)
 local Popup = {}
 do
-	local catcher = create("TextButton", {
-		Name = "PopupCatcher", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
-		Text = "", AutoButtonColor = false, Visible = false, ZIndex = 70,
-	}, Overlay)
-	local listFrame = create("ScrollingFrame", {
-		Name = "PopupList", BackgroundColor3 = THEME.PanelAlt, BorderSizePixel = 0,
-		Visible = false, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
-		ScrollingDirection = Enum.ScrollingDirection.Y, ScrollBarThickness = 4,
-		ScrollBarImageColor3 = THEME.ControlHover, ElasticBehavior = Enum.ElasticBehavior.Never, ZIndex = 71,
-	}, Overlay)
-	create("UICorner", { CornerRadius = UDim.new(0, 6) }, listFrame)
-	create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, listFrame)
-	create("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, listFrame)
-	create("UIPadding", {
-		PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4),
-		PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 4),
-	}, listFrame)
-	local function close()
-		catcher.Visible = false
-		listFrame.Visible = false
-		for _, child in ipairs(listFrame:GetChildren()) do
-			if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
-				child:Destroy()
-			end
-		end
-	end
-	catcher.Activated:Connect(close)
-	function Popup.open(anchorPos, anchorSize, items, currentId, onSelect)
-		close()
-		if type(items) ~= "table" or #items == 0 then
-			notify("Nothing to list yet.", "warn", 2.5)
-			return
-		end
-		local width = math.max((anchorSize and anchorSize.X) or 180, 180)
-		local rowHeight = 22
-		local listHeight = math.min(#items * (rowHeight + 2) + 10, 280)
-		local px = anchorPos.X
-		local py = anchorPos.Y + (anchorSize and anchorSize.Y or 20) + 4
-		pcall(function()
-			local viewport = workspace.CurrentCamera.ViewportSize
-			if px + width > viewport.X - 8 then px = viewport.X - 8 - width end
-			if px < 8 then px = 8 end
-			if py + listHeight > viewport.Y - 8 then py = anchorPos.Y - listHeight - 4 end
-			if py < 8 then py = 8 end
-		end)
-		listFrame.Position = UDim2.fromOffset(math.floor(px), math.floor(py))
-		listFrame.Size = UDim2.fromOffset(width, listHeight)
-		for order, item in ipairs(items) do
-			local id = tostring(item.id)
-			local label = tostring(item.label or id)
-			local isCurrent = (id == tostring(currentId))
-			local rowBtn = create("TextButton", {
-				Size = UDim2.new(1, 0, 0, rowHeight),
-				BackgroundColor3 = isCurrent and THEME.Selection or THEME.Control,
-				BackgroundTransparency = isCurrent and 0 or 1, BorderSizePixel = 0,
-				AutoButtonColor = false, Text = label,
-				TextColor3 = isCurrent and THEME.Text or Color3.fromRGB(205, 205, 214),
-				Font = Enum.Font.Gotham, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
-				TextTruncate = Enum.TextTruncate.AtEnd, LayoutOrder = order, ZIndex = 72,
-			}, listFrame)
-			create("UIPadding", { PaddingLeft = UDim.new(0, 8) }, rowBtn)
-			rowBtn.MouseEnter:Connect(function()
-				rowBtn.BackgroundColor3 = THEME.ControlHover
-				rowBtn.BackgroundTransparency = 0
-			end)
-			rowBtn.MouseLeave:Connect(function()
-				if id == tostring(currentId) then
-					rowBtn.BackgroundColor3 = THEME.Selection
-					rowBtn.BackgroundTransparency = 0
-				else
-					rowBtn.BackgroundColor3 = THEME.Control
-					rowBtn.BackgroundTransparency = 1
-				end
-			end)
-			rowBtn.Activated:Connect(function()
-				close()
-				onSelect(id)
-			end)
-		end
-		catcher.Visible = true
-		listFrame.Visible = true
-	end
-	Popup.close = close
-	Popup.isOpen = function() return catcher.Visible end
+        local catcher = create("TextButton", {
+                Name = "PopupCatcher", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+                Text = "", AutoButtonColor = false, Visible = false, ZIndex = 70,
+        }, Overlay)
+        local listFrame = create("ScrollingFrame", {
+                Name = "PopupList", BackgroundColor3 = THEME.PanelAlt, BorderSizePixel = 0,
+                Visible = false, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+                ScrollingDirection = Enum.ScrollingDirection.Y, ScrollBarThickness = 4,
+                ScrollBarImageColor3 = THEME.ControlHover, ElasticBehavior = Enum.ElasticBehavior.Never, ZIndex = 71,
+        }, Overlay)
+        create("UICorner", { CornerRadius = UDim.new(0, 6) }, listFrame)
+        create("UIStroke", { Color = THEME.Stroke, Thickness = 1 }, listFrame)
+        create("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, listFrame)
+        create("UIPadding", {
+                PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4),
+                PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 4),
+        }, listFrame)
+        local function close()
+                catcher.Visible = false
+                listFrame.Visible = false
+                for _, child in ipairs(listFrame:GetChildren()) do
+                        if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+                                child:Destroy()
+                        end
+                end
+        end
+        catcher.Activated:Connect(close)
+        function Popup.open(anchorPos, anchorSize, items, currentId, onSelect)
+                close()
+                if type(items) ~= "table" or #items == 0 then
+                        notify("Nothing to list yet.", "warn", 2.5)
+                        return
+                end
+                local width = math.max((anchorSize and anchorSize.X) or 180, 180)
+                local rowHeight = 22
+                local listHeight = math.min(#items * (rowHeight + 2) + 10, 280)
+                local px = anchorPos.X
+                local py = anchorPos.Y + (anchorSize and anchorSize.Y or 20) + 4
+                pcall(function()
+                        local viewport = workspace.CurrentCamera.ViewportSize
+                        if px + width > viewport.X - 8 then px = viewport.X - 8 - width end
+                        if px < 8 then px = 8 end
+                        if py + listHeight > viewport.Y - 8 then py = anchorPos.Y - listHeight - 4 end
+                        if py < 8 then py = 8 end
+                end)
+                listFrame.Position = UDim2.fromOffset(math.floor(px), math.floor(py))
+                listFrame.Size = UDim2.fromOffset(width, listHeight)
+                for order, item in ipairs(items) do
+                        local id = tostring(item.id)
+                        local label = tostring(item.label or id)
+                        local isCurrent = (id == tostring(currentId))
+                        local rowBtn = create("TextButton", {
+                                Size = UDim2.new(1, 0, 0, rowHeight),
+                                BackgroundColor3 = isCurrent and THEME.Selection or THEME.Control,
+                                BackgroundTransparency = isCurrent and 0 or 1, BorderSizePixel = 0,
+                                AutoButtonColor = false, Text = label,
+                                TextColor3 = isCurrent and THEME.Text or Color3.fromRGB(205, 205, 214),
+                                Font = Enum.Font.Gotham, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+                                TextTruncate = Enum.TextTruncate.AtEnd, LayoutOrder = order, ZIndex = 72,
+                        }, listFrame)
+                        create("UIPadding", { PaddingLeft = UDim.new(0, 8) }, rowBtn)
+                        rowBtn.MouseEnter:Connect(function()
+                                rowBtn.BackgroundColor3 = THEME.ControlHover
+                                rowBtn.BackgroundTransparency = 0
+                        end)
+                        rowBtn.MouseLeave:Connect(function()
+                                if id == tostring(currentId) then
+                                        rowBtn.BackgroundColor3 = THEME.Selection
+                                        rowBtn.BackgroundTransparency = 0
+                                else
+                                        rowBtn.BackgroundColor3 = THEME.Control
+                                        rowBtn.BackgroundTransparency = 1
+                                end
+                        end)
+                        rowBtn.Activated:Connect(function()
+                                close()
+                                onSelect(id)
+                        end)
+                end
+                catcher.Visible = true
+                listFrame.Visible = true
+        end
+        Popup.close = close
+        Popup.isOpen = function() return catcher.Visible end
 end
 -- PROPERTY SCHEMA
 local PROP_GROUPS = {
-	base      = { "Position", "Size", "AnchorPoint", "Rotation", "BackgroundColor3", "BackgroundTransparency", "BorderColor3", "BorderSizePixel", "Visible", "ZIndex", "LayoutOrder", "ClipsDescendants", "Active" },
-	text      = { "Text", "TextColor3", "TextSize", "TextScaled", "Font", "FontFace", "TextTransparency", "TextStrokeColor3", "TextStrokeTransparency", "TextWrapped", "TextTruncate", "RichText", "LineHeight", "TextXAlignment", "TextYAlignment" },
-	button    = { "AutoButtonColor" },
-	textbox   = { "PlaceholderText", "PlaceholderColor3", "ClearTextOnFocus", "MultiLine", "TextEditable", "TextWrapped" },
-	image     = { "Image", "ImageColor3", "ImageTransparency", "ScaleType", "ImageRectOffset", "ImageRectSize", "TileSize", "SliceCenter", "SliceScale" },
-	video     = { "Playing", "Looped", "Muted", "Volume", "Video" },
-	scroll    = { "CanvasSize", "CanvasPosition", "ScrollingEnabled", "ScrollingDirection", "ScrollBarThickness", "ScrollBarImageColor3", "ScrollBarImageTransparency", "VerticalScrollBarInset", "HorizontalScrollBarInset" },
-	viewport  = { "Ambient", "LightColor", "LightDirection" },
-	corner    = { "CornerRadius" },
-	stroke    = { "Color", "Thickness", "Transparency", "ApplyStrokeMode" },
-	gradient  = { "Color", "Rotation", "Offset", "Transparency", "Enabled" },
-	list      = { "FillDirection", "Padding", "SortOrder", "HorizontalAlignment", "VerticalAlignment" },
-	grid      = { "FillDirection", "CellSize", "CellPadding", "SortOrder", "HorizontalAlignment", "VerticalAlignment" },
-	table     = { "FillDirection", "Padding", "SortOrder", "HorizontalAlignment", "VerticalAlignment", "FillEmptySpaceRows", "FillEmptySpaceColumns", "MajorAxis" },
-	page      = { "FillDirection", "Padding", "SortOrder", "Animated", "Circular", "EasingStyle", "EasingDirection", "TweenTime", "TouchInputEnabled", "ScrollWheelInputEnabled", "GamepadInputEnabled" },
-	padding   = { "PaddingTop", "PaddingLeft", "PaddingRight", "PaddingBottom" },
-	scale     = { "Scale" },
-	sizeconstraint   = { "MinSize", "MaxSize" },
-	textsize  = { "MaxTextSize" },
-	aspectratio = { "AspectRatio", "AspectType", "DominantAxis", "DominantDirection" },
-	canvas    = { "GroupTransparency", "GroupColor3" },
-	screengui = { "Enabled", "DisplayOrder", "IgnoreGuiInset", "ResetOnSpawn", "ZIndexBehavior", "ScreenInsets" },
-	script    = { "Source", "Disabled" },
-	value     = { "Value" },
-	sound     = { "SoundId", "Volume", "PlaybackSpeed", "Looped", "Playing", "TimePosition" },
+        base      = { "Position", "Size", "AnchorPoint", "Rotation", "BackgroundColor3", "BackgroundTransparency", "BorderColor3", "BorderSizePixel", "Visible", "ZIndex", "LayoutOrder", "ClipsDescendants", "Active" },
+        text      = { "Text", "TextColor3", "TextSize", "TextScaled", "Font", "FontFace", "TextTransparency", "TextStrokeColor3", "TextStrokeTransparency", "TextWrapped", "TextTruncate", "RichText", "LineHeight", "TextXAlignment", "TextYAlignment" },
+        button    = { "AutoButtonColor" },
+        textbox   = { "PlaceholderText", "PlaceholderColor3", "ClearTextOnFocus", "MultiLine", "TextEditable", "TextWrapped" },
+        image     = { "Image", "ImageColor3", "ImageTransparency", "ScaleType", "ImageRectOffset", "ImageRectSize", "TileSize", "SliceCenter", "SliceScale" },
+        video     = { "Playing", "Looped", "Muted", "Volume", "Video" },
+        scroll    = { "CanvasSize", "CanvasPosition", "ScrollingEnabled", "ScrollingDirection", "ScrollBarThickness", "ScrollBarImageColor3", "ScrollBarImageTransparency", "VerticalScrollBarInset", "HorizontalScrollBarInset" },
+        viewport  = { "Ambient", "LightColor", "LightDirection" },
+        corner    = { "CornerRadius" },
+        stroke    = { "Color", "Thickness", "Transparency", "ApplyStrokeMode" },
+        gradient  = { "Color", "Rotation", "Offset", "Transparency", "Enabled" },
+        list      = { "FillDirection", "Padding", "SortOrder", "HorizontalAlignment", "VerticalAlignment" },
+        grid      = { "FillDirection", "CellSize", "CellPadding", "SortOrder", "HorizontalAlignment", "VerticalAlignment" },
+        table     = { "FillDirection", "Padding", "SortOrder", "HorizontalAlignment", "VerticalAlignment", "FillEmptySpaceRows", "FillEmptySpaceColumns", "MajorAxis" },
+        page      = { "FillDirection", "Padding", "SortOrder", "Animated", "Circular", "EasingStyle", "EasingDirection", "TweenTime", "TouchInputEnabled", "ScrollWheelInputEnabled", "GamepadInputEnabled" },
+        padding   = { "PaddingTop", "PaddingLeft", "PaddingRight", "PaddingBottom" },
+        scale     = { "Scale" },
+        sizeconstraint   = { "MinSize", "MaxSize" },
+        textsize  = { "MaxTextSize" },
+        aspectratio = { "AspectRatio", "AspectType", "DominantAxis", "DominantDirection" },
+        canvas    = { "GroupTransparency", "GroupColor3" },
+        screengui = { "Enabled", "DisplayOrder", "IgnoreGuiInset", "ResetOnSpawn", "ZIndexBehavior", "ScreenInsets" },
+        script    = { "Source", "Disabled" },
+        value     = { "Value" },
+        sound     = { "SoundId", "Volume", "PlaybackSpeed", "Looped", "Playing", "TimePosition" },
 }
 local CLASS_GROUPS = {
-	ScreenGui = { "screengui" }, Frame = { "base" }, CanvasGroup = { "base", "canvas" },
-	ScrollingFrame = { "base", "scroll" }, ViewportFrame = { "base", "viewport" },
-	TextLabel = { "base", "text" }, TextButton = { "base", "text", "button" },
-	TextBox = { "base", "text", "textbox" }, ImageLabel = { "base", "image" },
-	ImageButton = { "base", "image", "button" }, VideoFrame = { "base", "video" },
-	UICorner = { "corner" }, UIStroke = { "stroke" }, UIGradient = { "gradient" },
-	UIListLayout = { "list" }, UIGridLayout = { "grid" }, UITableLayout = { "table" },
-	UIPageLayout = { "page" }, UIPadding = { "padding" }, UIScale = { "scale" },
-	UISizeConstraint = { "sizeconstraint" }, UITextSizeConstraint = { "textsize" },
-	UIAspectRatioConstraint = { "aspectratio" },
-	LocalScript = { "script" }, ModuleScript = { "script" }, Folder = {},
-	Sound = { "sound" },
-	IntValue = { "value" }, NumberValue = { "value" }, StringValue = { "value" },
-	BoolValue = { "value" }, ObjectValue = { "value" }, Color3Value = { "value" },
-	Vector3Value = { "value" }, CFrameValue = { "value" }, BrickColorValue = { "value" },
-	RayValue = { "value" },
+        ScreenGui = { "screengui" }, Frame = { "base" }, CanvasGroup = { "base", "canvas" },
+        ScrollingFrame = { "base", "scroll" }, ViewportFrame = { "base", "viewport" },
+        TextLabel = { "base", "text" }, TextButton = { "base", "text", "button" },
+        TextBox = { "base", "text", "textbox" }, ImageLabel = { "base", "image" },
+        ImageButton = { "base", "image", "button" }, VideoFrame = { "base", "video" },
+        UICorner = { "corner" }, UIStroke = { "stroke" }, UIGradient = { "gradient" },
+        UIListLayout = { "list" }, UIGridLayout = { "grid" }, UITableLayout = { "table" },
+        UIPageLayout = { "page" }, UIPadding = { "padding" }, UIScale = { "scale" },
+        UISizeConstraint = { "sizeconstraint" }, UITextSizeConstraint = { "textsize" },
+        UIAspectRatioConstraint = { "aspectratio" },
+        LocalScript = { "script" }, ModuleScript = { "script" }, Folder = {},
+        Sound = { "sound" },
+        IntValue = { "value" }, NumberValue = { "value" }, StringValue = { "value" },
+        BoolValue = { "value" }, ObjectValue = { "value" }, Color3Value = { "value" },
+        Vector3Value = { "value" }, CFrameValue = { "value" }, BrickColorValue = { "value" },
+        RayValue = { "value" },
 }
 local PROP_TYPES = {
-	Name = "string",
-	Position = "udim2", Size = "udim2", AnchorPoint = "vector2", Rotation = "number",
-	BackgroundColor3 = "color", BackgroundTransparency = "number", BorderColor3 = "color",
-	BorderSizePixel = "number", LayoutOrder = "number", Active = "bool",
-	Visible = "bool", ZIndex = "number", ClipsDescendants = "bool",
-	Text = "string", TextColor3 = "color", TextSize = "number", TextScaled = "bool",
-	Font = "enum:Font", FontFace = "font", TextTransparency = "number", TextStrokeColor3 = "color",
-	TextStrokeTransparency = "number", TextWrapped = "bool", TextTruncate = "enum:TextTruncate",
-	RichText = "bool", LineHeight = "number",
-	TextXAlignment = "enum:TextXAlignment", TextYAlignment = "enum:TextYAlignment",
-	AutoButtonColor = "bool",
-	PlaceholderText = "string", PlaceholderColor3 = "color", ClearTextOnFocus = "bool",
-	MultiLine = "bool", TextEditable = "bool",
-	Image = "asset", ImageColor3 = "color", ImageTransparency = "number",
-	ScaleType = "enum:ScaleType", ImageRectOffset = "vector2", ImageRectSize = "vector2",
-	TileSize = "udim2", SliceCenter = "rect", SliceScale = "number",
-	Playing = "bool", Looped = "bool", Muted = "bool", Video = "asset",
-	CanvasSize = "udim2", CanvasPosition = "vector2", ScrollingEnabled = "bool",
-	ScrollingDirection = "enum:ScrollingDirection",
-	ScrollBarThickness = "number", ScrollBarImageColor3 = "color", ScrollBarImageTransparency = "number",
-	VerticalScrollBarInset = "enum:ScrollBarInset", HorizontalScrollBarInset = "enum:ScrollBarInset",
-	Ambient = "color", LightColor = "color", LightDirection = "vector3",
-	CornerRadius = "udim",
-	Color = "color", Thickness = "number", Transparency = "number", ApplyStrokeMode = "enum:ApplyStrokeMode",
-	Offset = "vector2", Enabled = "bool",
-	FillDirection = "enum:FillDirection", Padding = "udim", SortOrder = "enum:SortOrder",
-	HorizontalAlignment = "enum:HorizontalAlignment", VerticalAlignment = "enum:VerticalAlignment",
-	CellSize = "udim2", CellPadding = "udim2",
-	FillEmptySpaceRows = "bool", FillEmptySpaceColumns = "bool", MajorAxis = "enum:TableMajorAxis",
-	Animated = "bool", Circular = "bool", EasingStyle = "enum:PageLayoutEasingStyle",
-	EasingDirection = "enum:EasingDirection", TweenTime = "number",
-	TouchInputEnabled = "bool", ScrollWheelInputEnabled = "bool", GamepadInputEnabled = "bool",
-	PaddingTop = "udim", PaddingLeft = "udim", PaddingRight = "udim", PaddingBottom = "udim",
-	Scale = "number", MinSize = "vector2", MaxSize = "vector2", MaxTextSize = "number",
-	AspectRatio = "number", AspectType = "enum:AspectType", DominantAxis = "enum:DominantAxis",
-	DominantDirection = "enum:DominantDirection",
-	GroupTransparency = "number", GroupColor3 = "color",
-	DisplayOrder = "number", IgnoreGuiInset = "bool",
-	ResetOnSpawn = "bool", ZIndexBehavior = "enum:ZIndexBehavior", ScreenInsets = "enum:ScreenInsets",
-	Source = "source", Disabled = "bool",
-	SoundId = "asset", Volume = "number", PlaybackSpeed = "number", TimePosition = "number",
+        Name = "string",
+        Position = "udim2", Size = "udim2", AnchorPoint = "vector2", Rotation = "number",
+        BackgroundColor3 = "color", BackgroundTransparency = "number", BorderColor3 = "color",
+        BorderSizePixel = "number", LayoutOrder = "number", Active = "bool",
+        Visible = "bool", ZIndex = "number", ClipsDescendants = "bool",
+        Text = "string", TextColor3 = "color", TextSize = "number", TextScaled = "bool",
+        Font = "enum:Font", FontFace = "font", TextTransparency = "number", TextStrokeColor3 = "color",
+        TextStrokeTransparency = "number", TextWrapped = "bool", TextTruncate = "enum:TextTruncate",
+        RichText = "bool", LineHeight = "number",
+        TextXAlignment = "enum:TextXAlignment", TextYAlignment = "enum:TextYAlignment",
+        AutoButtonColor = "bool",
+        PlaceholderText = "string", PlaceholderColor3 = "color", ClearTextOnFocus = "bool",
+        MultiLine = "bool", TextEditable = "bool",
+        Image = "asset", ImageColor3 = "color", ImageTransparency = "number",
+        ScaleType = "enum:ScaleType", ImageRectOffset = "vector2", ImageRectSize = "vector2",
+        TileSize = "udim2", SliceCenter = "rect", SliceScale = "number",
+        Playing = "bool", Looped = "bool", Muted = "bool", Video = "asset",
+        CanvasSize = "udim2", CanvasPosition = "vector2", ScrollingEnabled = "bool",
+        ScrollingDirection = "enum:ScrollingDirection",
+        ScrollBarThickness = "number", ScrollBarImageColor3 = "color", ScrollBarImageTransparency = "number",
+        VerticalScrollBarInset = "enum:ScrollBarInset", HorizontalScrollBarInset = "enum:ScrollBarInset",
+        Ambient = "color", LightColor = "color", LightDirection = "vector3",
+        CornerRadius = "udim",
+        Color = "color", Thickness = "number", Transparency = "number", ApplyStrokeMode = "enum:ApplyStrokeMode",
+        Offset = "vector2", Enabled = "bool",
+        FillDirection = "enum:FillDirection", Padding = "udim", SortOrder = "enum:SortOrder",
+        HorizontalAlignment = "enum:HorizontalAlignment", VerticalAlignment = "enum:VerticalAlignment",
+        CellSize = "udim2", CellPadding = "udim2",
+        FillEmptySpaceRows = "bool", FillEmptySpaceColumns = "bool", MajorAxis = "enum:TableMajorAxis",
+        Animated = "bool", Circular = "bool", EasingStyle = "enum:PageLayoutEasingStyle",
+        EasingDirection = "enum:EasingDirection", TweenTime = "number",
+        TouchInputEnabled = "bool", ScrollWheelInputEnabled = "bool", GamepadInputEnabled = "bool",
+        PaddingTop = "udim", PaddingLeft = "udim", PaddingRight = "udim", PaddingBottom = "udim",
+        Scale = "number", MinSize = "vector2", MaxSize = "vector2", MaxTextSize = "number",
+        AspectRatio = "number", AspectType = "enum:AspectType", DominantAxis = "enum:DominantAxis",
+        DominantDirection = "enum:DominantDirection",
+        GroupTransparency = "number", GroupColor3 = "color",
+        DisplayOrder = "number", IgnoreGuiInset = "bool",
+        ResetOnSpawn = "bool", ZIndexBehavior = "enum:ZIndexBehavior", ScreenInsets = "enum:ScreenInsets",
+        Source = "source", Disabled = "bool",
+        SoundId = "asset", Volume = "number", PlaybackSpeed = "number", TimePosition = "number",
 }
 local CLASS_PROP_TYPES = {
-	StringValue = { Value = "string" }, IntValue = { Value = "number" },
-	NumberValue = { Value = "number" }, BoolValue = { Value = "bool" },
-	ObjectValue = { Value = "object" }, Color3Value = { Value = "color" },
-	Vector3Value = { Value = "vector3" }, CFrameValue = { Value = "cframe" },
-	BrickColorValue = { Value = "brickcolor" }, RayValue = { Value = "object" },
-	UITableLayout = { Padding = "udim2" },
-	UIGradient = { Color = "colorsequence", Transparency = "numbersequence" },
+        StringValue = { Value = "string" }, IntValue = { Value = "number" },
+        NumberValue = { Value = "number" }, BoolValue = { Value = "bool" },
+        ObjectValue = { Value = "object" }, Color3Value = { Value = "color" },
+        Vector3Value = { Value = "vector3" }, CFrameValue = { Value = "cframe" },
+        BrickColorValue = { Value = "brickcolor" }, RayValue = { Value = "object" },
+        UITableLayout = { Padding = "udim2" },
+        UIGradient = { Color = "colorsequence", Transparency = "numbersequence" },
 }
 local FALLBACK_GROUP_KEYS = {
-	"base", "text", "button", "textbox", "image", "video", "scroll", "viewport",
-	"corner", "stroke", "gradient", "list", "grid", "table", "page", "padding",
-	"scale", "sizeconstraint", "textsize", "aspectratio", "canvas", "screengui",
+        "base", "text", "button", "textbox", "image", "video", "scroll", "viewport",
+        "corner", "stroke", "gradient", "list", "grid", "table", "page", "padding",
+        "scale", "sizeconstraint", "textsize", "aspectratio", "canvas", "screengui",
 }
 -- AUTO PROPERTY FETCHER (official API dump, cached)
 local PropFetcher = { status = "loading", lastError = nil, _props = nil, _super = nil }
@@ -1750,7 +1841,7 @@ function Editor.spawnClass(class)
 		notify(("Cannot create class '%s'."):format(tostring(class)), "error", 3)
 		return nil
 	end
-	inst.Name = uniqueName(class)
+	inst.Name = uniqueName(class, parent)
 	local decorator = SPAWN_DEFAULTS[class]
 	if decorator then
 		State.spawnCascade = (State.spawnCascade + 1) % 8
@@ -2293,7 +2384,7 @@ local function generateExportCode()
 	local lines = {}
 	local function emit(text) lines[#lines + 1] = text end
 	emit("--[[")
-	emit("\tGenerated by StudioGUI Creator v1.7 — WYSIWYG GUI Editor")
+	emit("\tGenerated by StudioGUI Creator v1.8 — WYSIWYG GUI Editor")
 	emit(("\tExported: %s  |  Instances: %d  |  Executor: %s"):format(
 		os.date("%Y-%m-%d %H:%M:%S"), totalInstances, Executor.name))
 	emit("")
@@ -2687,11 +2778,7 @@ local function verifiedWrite(path, content)
 	if not ok then return false, tostring(err) end
 	if FS.isfile then
 		local okExists, exists = pcall(FS.isfile, path)
-		if not (okExists and exists) then return false, "file not found after write" end
-	end
-	if FS.readfile then
-		local okRead, back = pcall(FS.readfile, path)
-		if not okRead or back ~= content then return false, "write verification failed" end
+		if okExists and not exists then return false, "file missing after write" end
 	end
 	return true
 end
@@ -2714,20 +2801,21 @@ end
 local function collectSaveData()
 	local guis = getProjectScreenGuis()
 	if #guis == 0 then return nil end
-	local payload = { app = "StudioGUI Creator", version = 1.7, savedAt = os.time(), guis = {} }
+	local payload = { app = "StudioGUI Creator", version = 1.8, savedAt = os.time(), guis = {} }
 	local function serialize(inst)
 		local node = { class = inst.ClassName, name = inst.Name, props = {}, children = {} }
 		for _, propName in ipairs(exportPropertyNameList(inst.ClassName)) do
-			if propName ~= "Parent" and propIsWritable(inst, propName) then
-				local ok, value = pcall(function() return inst[propName] end)
-				if ok then
-					local ptype = resolvePropertyType(inst, propName)
-					if ptype and ptype ~= "object" then
-						local text = formatValue(ptype, value)
-						if text and #text <= 100000 then
-							table.insert(node.props, { p = propName, t = ptype, v = text })
-						end
-					end
+			if propName ~= "Parent" and propName ~= "Name" then
+				local okProp, ptype, text = pcall(function()
+					if not propIsWritable(inst, propName) then return nil end
+					local okV, value = pcall(function() return inst[propName] end)
+					if not okV then return nil end
+					local pt = resolvePropertyType(inst, propName)
+					if not pt or pt == "object" then return nil end
+					return pt, formatValue(pt, value)
+				end)
+				if okProp and ptype and type(text) == "string" and #text <= 100000 then
+					table.insert(node.props, { p = propName, t = ptype, v = text })
 				end
 			end
 		end
@@ -2784,22 +2872,42 @@ local function loadProjectData(payload)
 	end
 	return true, ("%d ScreenGui(s) rebuilt"):format(count)
 end
+local function sanitizeFileName(name)
+	name = tostring(name or ""):gsub("^%s+", ""):gsub("%s+$", "")
+	name = name:gsub("[^%w%-_ %[%]%(%)]", "_")
+	name = name:gsub("%s+", " ")
+	return name
+end
 local function saveProjectToFile(fileName)
-	if not fileName or fileName == "" then return end
-	if not fileName:match("^[%w%-_ %[%]%(%)]+$") then
-		notify("File name can only use letters, numbers, spaces and - _ [ ] ( ).", "warn", 3.5)
+	if fileName == nil or tostring(fileName) == "" then return end
+	fileName = sanitizeFileName(fileName)
+	if fileName == "" then
+		notify("Type a file name first.", "warn", 2.5)
 		return
 	end
-	local payload = collectSaveData()
+	local okPayload, payload = pcall(collectSaveData)
+	if not okPayload then
+		notify("Save failed while collecting data: " .. tostring(payload):gsub("[\r\n]+", " "):sub(1, 180), "error", 5)
+		return
+	end
 	if not payload then
 		notify("Nothing to save — create a GUI first.", "warn", 2.5)
 		return
 	end
+	local okJson, json = pcall(function() return HttpService:JSONEncode(payload) end)
+	if not okJson or type(json) ~= "string" then
+		notify("Save failed — could not encode the project to JSON.", "error", 5)
+		return
+	end
 	ensureSaveFolder()
 	local path = SAVE_DIR .. "/" .. fileName .. ".json"
-	local ok, err = verifiedWrite(path, safeJsonEncode(payload))
-	notify(ok and ("Saved '" .. fileName .. "' (verified).") or ("Save failed: " .. tostring(err)),
-		ok and "success" or "error", 3.5)
+	local ok, err = verifiedWrite(path, json)
+	if ok then
+		notify("Saved '" .. fileName .. ".json' in " .. SAVE_DIR .. ".", "success", 3)
+		pcall(refreshExplorerSelection)
+	else
+		notify("Save failed: " .. tostring(err), "error", 5)
+	end
 end
 local function loadProjectFromFile(path)
 	if not (FS.readfile and FS.isfile) then
@@ -2961,12 +3069,9 @@ do
 		return btn
 	end
 	bottomButton("Add File", -312, 84, function()
-		makePrompt("Name the File:", "", function(name)
-			if name == "" then return end
-			makeConfirm("Save the current project as '" .. name .. ".json'?", function()
-				saveProjectToFile(name)
-				refreshFiles()
-			end)
+		makePrompt("Name the file to save:", "", function(name)
+			saveProjectToFile(name)
+			refreshFiles()
 		end)
 	end, true)
 	bottomButton("Refresh", -224, 80, refreshFiles)
@@ -2980,7 +3085,7 @@ end
 -- AI CHAT MODULE
 do
 	local AIState = {
-		messages = {}, busyCount = 0, gen = 0,
+		messages = {}, busyCount = 0, gen = 0, turnId = 0, busyToken = nil,
 		agentMode = false, codeMode = false, autoSwitch = true,
 		pending = nil, providers = {}, activeId = "openai",
 	}
@@ -3478,12 +3583,15 @@ do
 			})
 			if ok then
 				if type(resp) == "table" then
-					return {
-						status = tonumber(resp.StatusCode or resp.code or resp.Status) or 0,
-						body = tostring(resp.Body or resp.body or ""),
-					}
+					local status = tonumber(resp.StatusCode or resp.code or resp.Status or resp.statusCode) or 0
+					local body = resp.Body or resp.body or resp.response or ""
+					if status == 0 and tostring(body) ~= "" then status = 200 end
+					return { status = status, body = tostring(body) }
 				end
-				return { status = 200, body = tostring(resp) }
+				if type(resp) == "string" then
+					return { status = 200, body = resp }
+				end
+				return { status = 200, body = "" }
 			end
 		end
 		if method == "GET" then
@@ -3578,7 +3686,7 @@ do
 	local function buildSystemPrompt()
 		local sel = State.selected
 		local lines = {
-			"You are the built-in assistant of StudioGUI Creator v1.7, a WYSIWYG GUI editor running inside a Roblox executor on the user's client.",
+			"You are the built-in assistant of StudioGUI Creator v1.8, a WYSIWYG GUI editor running inside a Roblox executor on the user's client.",
 			"You help build and edit a Roblox ScreenGui project. Use the provided tools to inspect and change the GUI. Paths look like ScreenGuiName/Frame/Child.",
 			"Property value formats: color '255, 0, 0' or '#ff00aa'; UDim2 'scaleX, offX, scaleY, offY'; UDim 'scale, off'; Vector2/Vector3 comma lists; bool true/false; enums by exact name; numbers plain; assets as digits or rbxassetid://...; strings raw text.",
 			"Work step by step with tools; after each round give a one-line progress note. Never invent tool results. Keep answers concise.",
@@ -3612,11 +3720,43 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 	local function sanitizeHistory(messages, compat, includeTools)
 		local kept = {}
 		for _, m in ipairs(messages) do table.insert(kept, m) end
-		while #kept > MAX_HISTORY do table.remove(kept, 1) end
-		while #kept > 2 and kept[1] and kept[1].role ~= "user" do table.remove(kept, 1) end
-		if #kept == 0 then table.insert(kept, { role = "user", content = "Continue." }) end
+		while #kept > MAX_HISTORY do
+			local j = 1
+			while kept[j] and kept[j].role ~= "assistant" do j += 1 end
+			local cut = 0
+			if kept[j] then
+				cut = j
+				j += 1
+				while kept[j] and kept[j].role == "tool" do j += 1 end
+				cut = j - 1
+			end
+			if cut == 0 or cut >= #kept then break end
+			for _ = 1, cut do table.remove(kept, 1) end
+		end
+		while #kept > 1 and kept[1] and kept[1].role ~= "user" do table.remove(kept, 1) end
+		local cleaned = {}
+		for idx, m in ipairs(kept) do
+			if m.role == "tool" then
+				local prev = cleaned[#cleaned]
+				if prev and prev.role == "assistant" and prev.toolCalls and #prev.toolCalls > 0 then
+					table.insert(cleaned, m)
+				end
+			elseif m.role == "assistant" and type(m.toolCalls) == "table" and #m.toolCalls > 0 then
+				table.insert(cleaned, m)
+				local nxt = kept[idx + 1]
+				if not (nxt and nxt.role == "tool") then
+					local synth = { role = "tool", results = {} }
+					for _, tc in ipairs(m.toolCalls) do
+						table.insert(synth.results, { id = tc.id, name = tc.name, output = "[interrupted — no result recorded]" })
+					end
+					table.insert(cleaned, synth)
+				end
+			else
+				table.insert(cleaned, m)
+			end
+		end
 		local out = {}
-		for _, m in ipairs(kept) do
+		for _, m in ipairs(cleaned) do
 			if m.role == "user" then
 				table.insert(out, { role = "user", content = cap(m.content, MAX_CONTENT_CHARS) })
 			elseif m.role == "assistant" then
@@ -3624,7 +3764,7 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 				local hasCalls = includeTools and m.toolCalls and #m.toolCalls > 0
 				if text ~= "" or hasCalls then
 					table.insert(out, {
-						role = "assistant", content = text ~= "" and text or nil,
+						role = "assistant", content = text ~= "" and text or "",
 						toolCalls = hasCalls and m.toolCalls or nil,
 					})
 				end
@@ -3642,14 +3782,8 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 				local last = merged[#merged]
 				if last and last.role == m.role and m.role == "user" then
 					last.content = cap((last.content or "") .. "\n" .. (m.content or ""), MAX_CONTENT_CHARS)
-					last.toolResults = (last.toolResults or 0) + (m.toolResults or 0)
-					if m.rawToolResults then
-						last.rawToolResults = last.rawToolResults or {}
-						for _, r in ipairs(m.rawToolResults) do table.insert(last.rawToolResults, r) end
-					end
 				else
-					local copy = { role = m.role, content = m.content, toolCalls = m.toolCalls, results = m.results }
-					table.insert(merged, copy)
+					table.insert(merged, { role = m.role, content = m.content, toolCalls = m.toolCalls, results = m.results })
 				end
 			end
 			out = merged
@@ -3673,7 +3807,6 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 						}
 					end
 					entry.tool_calls = tcs
-					if entry.content == "" then entry.content = nil end
 				end
 				msgs[#msgs + 1] = entry
 			elseif m.role == "tool" then
@@ -3722,6 +3855,9 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 			model = activeModel(provider), max_tokens = 4096,
 			system = buildSystemPrompt(), messages = msgs,
 		}
+		if msgs[1] and msgs[1].role == "assistant" then
+			table.insert(msgs, 1, { role = "user", content = { { type = "text", text = "Continue." } } })
+		end
 		if includeTools then payload.tools = toolSchemas("anthropic") end
 		return payload
 	end
@@ -3758,6 +3894,9 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 			contents = contents,
 			generationConfig = { maxOutputTokens = 8192 },
 		}
+		if contents[1] and contents[1].role == "model" then
+			table.insert(contents, 1, { role = "user", parts = { { text = "Continue." } } })
+		end
 		if includeTools then payload.tools = { { functionDeclarations = toolSchemas("google") } } end
 		return payload
 	end
@@ -3845,23 +3984,32 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 	local function aiRequest(provider, messages, includeTools)
 		local key = provider.key or ""
 		if key == "" and provider.compat ~= "google" then
-			return nil, "No API key set for " .. provider.name .. " — open Providers and paste your key."
+			return nil, "No API key set for " .. provider.name .. " — open Providers, paste your key, press Save Provider."
 		end
 		local url, headers, payload = providerRequest(provider, messages, includeTools)
+		local myGen = AIState.gen
+		local busyToken = {}
+		AIState.busyToken = busyToken
 		AIState.busyCount += 1
 		setThinking(true, provider.name .. " / " .. activeModel(provider))
-		local myGen = AIState.gen
 		local watchdogDone = false
-		local watchdog = task.delay(90, function()
-			if AIState.gen == myGen and AIState.busyCount > 0 and not watchdogDone then
+		task.delay(90, function()
+			if watchdogDone then return end
+			watchdogDone = true
+			if AIState.busyToken == busyToken then
+				AIState.busyToken = nil
 				AIState.busyCount = 0
+				AIState.turnId += 1
 				setThinking(false)
-				AI.addMessage("error", "Request timed out (90s watchdog). The executor HTTP call hung — try again, or /switch-model.")
+				AI.addMessage("error", "Request timed out after 90s (executor HTTP hung). Press Send to retry, or /switch-model.")
 			end
 		end)
 		local ok, res = pcall(httpJSON, url, "POST", headers, payload)
-		pcall(function() task.cancel(watchdog) end)
 		watchdogDone = true
+		if AIState.busyToken ~= busyToken then
+			return nil, "cancelled"
+		end
+		AIState.busyToken = nil
 		AIState.busyCount = math.max(0, AIState.busyCount - 1)
 		if AIState.gen ~= myGen then return nil, "cancelled" end
 		setThinking(false)
@@ -4192,6 +4340,7 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 		AIState.messages = AIState.pending
 		AIState.pending = nil
 		AIState.gen += 1
+		AIState.turnId += 1
 		AI.addMessage("info", "continue-task: resuming…")
 		task.spawn(function() pcall(AI.runTurn) end)
 	end
@@ -4213,11 +4362,13 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 			AI.addMessage("error", "No API key for " .. provider.name .. " — open Providers (AI CHAT header) and paste your key.")
 			return
 		end
+		local myTurn = AIState.turnId or 0
 		local steps = 0
 		while steps < MAX_AGENT_STEPS do
 			provider = activeProvider()
 			local includeTools = AIState.agentMode and not AIState.codeMode
 			local decoded, err = aiRequest(provider, AIState.messages, includeTools)
+			if AIState.turnId ~= myTurn then return end
 			if not decoded then
 				if err == "cancelled" then
 					AI.addMessage("info", "Stopped.")
@@ -4229,6 +4380,7 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 						if not AI.switchModel(nil) then break end
 						provider = activeProvider()
 						decoded, err = aiRequest(provider, AIState.messages, includeTools)
+						if AIState.turnId ~= myTurn then return end
 						if decoded then break end
 						if err == "cancelled" then
 							AI.addMessage("info", "Stopped.")
@@ -4240,6 +4392,7 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 						persistAISettings()
 						AI.addMessage("trace", "provider rejected native tools — falling back to Code Mode for this session")
 						decoded, err = aiRequest(provider, AIState.messages, false)
+						if AIState.turnId ~= myTurn then return end
 					end
 				end
 				if not decoded then
@@ -4261,6 +4414,13 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 			end
 			if toolCalls and #toolCalls > 0 then
 				assistantEntry.toolCalls = toolCalls
+			end
+			if assistantEntry.toolCalls then
+				for ci, tc in ipairs(assistantEntry.toolCalls) do
+					if tc.id == nil or tc.id == "" then
+						tc.id = "call_" .. tostring(ci) .. "_" .. tostring(tc.name)
+					end
+				end
 			end
 			table.insert(AIState.messages, assistantEntry)
 			if assistantEntry.content and assistantEntry.content ~= "" then
@@ -4308,6 +4468,7 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 		AI.addMessage("user", text)
 		table.insert(AIState.messages, { role = "user", content = cap(text, MAX_CONTENT_CHARS) })
 		AIState.gen += 1
+		AIState.turnId += 1
 		task.spawn(function() pcall(AI.runTurn) end)
 	end
 	handleCommand = function(text)
@@ -4426,6 +4587,22 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 		updateModelButton()
 		notify(("Fetched %d models for %s."):format(#list, provider.name), "success", 3)
 	end
+	function AI.testProvider(p)
+		p = p or activeProvider()
+		if not p then return end
+		if (p.key or "") == "" and p.compat ~= "google" then
+			notify("Paste an API key for " .. p.name .. " first.", "warn", 3)
+			return
+		end
+		notify("Testing " .. p.name .. " / " .. activeModel(p) .. "…", "info", 2)
+		local decoded, err = aiRequest(p, { { role = "user", content = "Reply with the single word: ok" } }, false)
+		if decoded then
+			local text = parseAIResponse(decoded, p.compat)
+			notify("Test OK — " .. p.name .. " replied: " .. firstLine(text or "(empty)"), "success", 5)
+		else
+			notify("Test FAILED — " .. firstLine(err or "unknown error"), "error", 6)
+		end
+	end
 	-- PROVIDERS SETTINGS MODAL
 	local settingsSelectedId = nil
 	local function buildSettingsModal()
@@ -4480,9 +4657,9 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 			create("UIPadding", { PaddingLeft = UDim.new(0, 6) }, box)
 			return box
 		end
-		local function rowButton(parent, text, x, width, color, onClick)
+		local function rowButton(parent, text, x, width, color, onClick, y)
 			local btn = create("TextButton", {
-				Position = UDim2.new(1, x, 0, 0), Size = UDim2.fromOffset(width, 24),
+				Position = UDim2.new(1, x, 0, y or 0), Size = UDim2.fromOffset(width, 24),
 				BackgroundColor3 = color or THEME.Control, BorderSizePixel = 0, Text = text,
 				TextColor3 = THEME.Text, Font = Enum.Font.GothamMedium, TextSize = 11,
 				AutoButtonColor = false, ZIndex = 62,
@@ -4567,7 +4744,7 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 					pcall(Executor.clipboard, baseBox.Text)
 					notify("Base URL copied.", "success", 1.5)
 				end
-			end)
+			end, 64)
 			rowLabel(pane, 94, "API Key")
 			local keyBox = rowBox(pane, 94, p.key or "", true)
 			rowLabel(pane, 124, "Model")
@@ -4583,12 +4760,19 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 					persistAISettings()
 					updateModelButton()
 				end)
-			end)
+			end, 124)
 			rowButton(pane, "Fetch", -88, 56, THEME.Accent, function()
 				p.base = baseBox.Text
 				p.key = keyBox.Text
+				persistAISettings()
 				AI.fetchModels(p)
-			end)
+			end, 124)
+			rowButton(pane, "Test", -88, 56, nil, function()
+				p.base = baseBox.Text
+				p.key = keyBox.Text
+				persistAISettings()
+				AI.testProvider(p)
+			end, 94)
 			local toggles = create("Frame", {
 				Position = UDim2.fromOffset(78, 158), Size = UDim2.new(1, -86, 0, 24),
 				BackgroundTransparency = 1, ZIndex = 62,
@@ -4631,11 +4815,13 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 				end
 				p.key = tostring(keyBox.Text)
 				p.model = tostring(modelBox.Text)
+				AIState.activeId = p.id
 				persistAISettings()
 				updateModelButton()
 				refreshProviderList()
-				notify("Provider settings saved (GUI_CREATOR_AI_SETTINGS.json).", "success", 3)
-			end)
+				refreshSettingsPane()
+				notify("Saved & activated " .. tostring(nameBox.Text) .. " — now press Test, then send a chat message.", "success", 4)
+			end, 196)
 			if not p.locked then
 				rowButton(pane, "Delete", -122, 72, THEME.Danger, function()
 					makeConfirm("Delete provider '" .. p.name .. "'?", function()
@@ -4651,7 +4837,7 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 						refreshProviderList()
 						refreshSettingsPane()
 					end)
-				end)
+				end, 196)
 			end
 			rowButton(pane, "Use This Provider", -448, 172, THEME.Control, function()
 				p.key = tostring(keyBox.Text)
@@ -4662,7 +4848,7 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 				refreshProviderList()
 				refreshSettingsPane()
 				notify("Active provider: " .. p.name .. " / " .. activeModel(), "success", 3)
-			end)
+			end, 196)
 		end
 		local addBtn = create("TextButton", {
 			AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 8, 1, -10), Size = UDim2.fromOffset(180, 26),
@@ -4696,6 +4882,7 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 		AIState.messages = {}
 		AIState.pending = nil
 		AIState.gen += 1
+		AIState.turnId += 1
 		AIState.busyCount = 0
 		setThinking(false)
 		if chatRefs.scroll then
@@ -4715,7 +4902,7 @@ CODE MODE (active): native tool JSON is disabled. Reply with either:
 			.. " · Agent: " .. (AIState.agentMode and "On" or "Off")
 			.. " · Backend: " .. (AIState.codeMode and "Code Mode" or "Native Tools")
 			.. " · AutoSwitch: " .. (AIState.autoSwitch and "On" or "Off")
-			.. "\nSet your API key in Providers (top-right of this panel). /help lists commands.")
+			.. "\nSetup: open Providers (top-right), paste your API key, press Save Provider (auto-activates), then Test. /help lists commands.")
 	end
 end
 -- INIT
@@ -4725,6 +4912,6 @@ PropPanel.init()
 updateStatus()
 AI.init()
 task.defer(function() UI.relayout() end)
-notify("StudioGUI Creator v1.7 loaded — " .. Executor.name, "success", 3)
+notify("StudioGUI Creator v1.8 loaded — " .. Executor.name, "success", 3)
 end
 main()
